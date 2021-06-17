@@ -1,0 +1,79 @@
+@import url('https://fonts.googleapis.com/css2?family=Source+Code+Pro&display=swap');
+
+
+html, body {
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+body {
+    background-color: #262626;
+    position: relative;
+    width: 100%;
+    display: block;
+    font-family: 'Source Code Pro', monospace;
+}
+
+body > *  {
+    margin: auto;
+    width: 100%;
+    display: block;
+    /*overflow: auto;*/
+    font-family: 'Source Code Pro', monospace;
+  }
+
+pre {
+    color: #a29bfe;   
+}
+
+p, pre.text {
+    color: #a29bfe;
+    font-family: 'Source Code Pro', monospace;
+    white-space: pre-wrap;       /* Since CSS 2.1 */
+    white-space: -moz-pre-wrap;  /* Mozilla, since 1999 */
+    white-space: -pre-wrap;      /* Opera 4-6 */
+    white-space: -o-pre-wrap;    /* Opera 7 */
+    word-wrap: break-word;       /* Internet Explorer 5.5+ */
+    font-weight: bold;
+}
+
+pre.code {
+    color: #fab1a0;
+    font-family: 'Source Code Pro', monospace;
+    font-size: small;
+    border: 1px solid #a29bfe;
+    max-height: 500px;
+    overflow: auto;
+    word-break: normal !important;
+    word-wrap: normal !important;
+    white-space: pre !important;
+}
+
+h2, h1, h3, h4 {
+    color: #55efc4;
+    font-family: 'Source Code Pro', monospace;
+}
+
+b{
+    color:#ff7675;
+    font-family: 'Source Code Pro', monospace;
+}
+
+b.green {
+        color:#55efc4;
+        font-family: 'Source Code Pro', monospace;
+}
+
+li {
+    color: #55efc4;
+    font-family: 'Source Code Pro', monospace;
+    list-style-type: none;
+}
+
+a {
+    color:#ffeaa7;
+}
+a:link{color:#ffeaa7}
+a:active{color:#ffeaa7}
+a:visited{color:#ffeaa7}
+a:hover{color:#ffeaa7}

