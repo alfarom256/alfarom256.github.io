@@ -48,12 +48,10 @@ The Windows Fiber API exposes a means of manually "scheduling" execution within 
 In regular terms, the Windows Fiber API provides developers with a means to manually schedule execution of many routines (converted to fibers) with a simple, lightweight API in <b>one thread</b>. 
 <b>(Many Fibers, One Thread, Manually Switched)</b>
 
-It is important to note that a fiber is not 
-
 A similar, thread-based API exists as the User Mode Scheduler API (UMS) which provides similar, more robust (read: complex), <b>thread-based</b> scheduling capabilities for developers. 
 <b>(Many Threads, One Scheduler Routine)</b>
 
-While not the topic of this post, I found it relevant to call out because I think both are really neat.
+While not the topic of this post, I found it relevant to call out because I think both APIs are pretty cool.
 </pre>
 <h3 id="1">0x01: Intro</h3>
 <pre class="text">
