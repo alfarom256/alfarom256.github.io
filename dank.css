@@ -35,6 +35,7 @@ p, pre.text {
     white-space: -o-pre-wrap;    /* Opera 7 */
     word-wrap: break-word;       /* Internet Explorer 5.5+ */
     font-weight: bold;
+    font-size: 14px;
 }
 
 pre.code {
@@ -47,6 +48,9 @@ pre.code {
     word-break: normal !important;
     word-wrap: normal !important;
     white-space: pre !important;
+    padding: 5px 10px; 
+    box-sizing: border-box;
+    /* Thank you, LR :) */
 }
 
 h2, h1, h3, h4 {
