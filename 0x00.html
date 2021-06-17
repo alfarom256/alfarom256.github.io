@@ -687,7 +687,7 @@ KERNELBASE!BaseInitializeFiberContext:
 <pre class="text">
 From all of this we can see the allocation of the FIBER struct, allocating/constructing the ActCtx and the stack, instantiating the CONTEXT for the fiber with the instruction pointer to our fiber routine!
 Awesome!
-So now that means the offset of the instruction pointer is at offset 0x80 + 0x30 from the CONTEXT, <b>0xB0</b>.
+So now that means the offset of the instruction pointer is at offset 0x80 from the CONTEXT, which is itself offset 0x30 from the fiber object for total offset of <b>0xB0</b>.
 
 A quick definition of ReactOS' <a href="https://doxygen.reactos.org/dd/d83/ndk_2ketypes_8h_source.html">FIBER</a> structure:
 <b>Note: This structure is not complete for replication in W10 20H2 x64 (not sure about others)</b>
