@@ -29,12 +29,6 @@
         <h3>Intro</h3>
         <p>
 Rabbit holes, am I right?<br> 
-Recently, I have been bothered by my lack of undersanding of the inner workings of the Windows Kernel's memory manager.
-Luckily, having just completed trainings by @pavely, CodeMachine, and OSR empowered me to delve deeper into the arcane, magical world that is the Windows Kernel.
-I wanted to understand how, and by what mechanisms, does the kernel "resolve" a usermode virtual address (UVA) into it's real Physical Address (PA).
-I don't claim to be an expert or authority on Kernel programming or the Memory Manager by any means, and if there are errors in the following *please* make a pull request.
-I am super, super excited to just learn more about the kernel.<br>
-
 Much incredible work has been done already to describe this process, and without the following posts (in no particular order), I would not have been able to accomplish my task:<br>
 </p>
 <ol> <!-- lmao @ "in no particular order" but uses <ol> -->
@@ -53,13 +47,16 @@ Much incredible work has been done already to describe this process, and without
 </ol>
 
 <p>
-Shoutout to ch3rn0byl and s4r1n, some real ones right there.
+s/o to ch3rn0byl and s4r1n
 </p>
 <h3>Objective</h3>
 <p>The purpose of my small project was to understand the inner workings of the kernel that are responsible for translating a UMVA into the PA. 
 After finishing up my OSR class recently, I wanted to know more about how VADs <i>actually worked under the hood</i>, and how the kernel leverages them to describe the PTEs associated with a section.
+I wanted to understand how, and by what mechanisms, does the kernel "resolve" a virtual address (UMVA) into it's Physical Address (PA).
 Of course, you can't really go far when talking about memory management in the kernel without talking about PTEs, PML4, PDPTEs, etc, but there are other, better resources that go in-depth into addressing. 
 Arming myself with the knowledge from the above links (read them, and if you wrote them, "hi!") I set out to take a deeper dive into the VAD.
+
+I am no expert or authority on Kernel programming or the Memory Manager by any means, and if there are errors in the following *please* make a pull request.
 </p>
 <h3>What is a VAD?</h3>
 <p>In short (and so I don't shoot myself in the foot), the Virtual Address Descriptor (VAD) is an <a href="https://en.wikipedia.org/wiki/AVL_tree">AVL Tree</a>, where each node describes a region of memory allocated within the target process.
@@ -292,7 +289,7 @@ Total VADs: 26, average level: 4, maximum depth: 5
 Total private commit: 0xa3 pages (652 KB)
 Total shared commit:  0x3a pages (232 KB)
 </pre>
-<p>The highlighted VAD Node covers the (adjusted) usermode range in our process between <b class="green">0x7ff7d3810000</b> and <b class="green">0x7ff7d39870000</b>
+<p>The highlighted VAD Node covers the (adjusted) virtual address range in our process between <b class="green">0x7ff7d3810000</b> and <b class="green">0x7ff7d39870000</b>
 
 Refer back to our dummy_data UMVA:
 <b>0x00007ff7d3942</b><b class="green">0b0</b>
@@ -346,7 +343,7 @@ The _SUBSECTION member of a VAD Node is confusing (to me), but through examining
 
 <p>Taking the start of the VA from the VAD Node (<b class="green">0x7ff7d3810</b>) and our UMVA (<b>0x00007ff7d3942</b><b class="green">0b0</b>), we'll subtract the UMVA without the offset bits (<b class="green">0b0</b>) from the VadRoot's Start VA.
 
-<b>0x00007ff7d3942</b> - <b class="green">0x7ff7d3810</b> = 0x132 (306)
+<b>0x7ff7d3942</b> - <b class="green">0x7ff7d3810</b> = 0x132 (306)
 
 This means, with a page size of 0x1000, our target data lies within the 306th page!
 Sweet!
