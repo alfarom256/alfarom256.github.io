@@ -102,7 +102,7 @@ Without going too much into detail about address translation, we know the size o
 
 By multiplying the Start and End values by 0x1000, we will find the values actually represented in user-mode (UM).
 
-E.g. for the last VAD, we'll take <b>0x7ff7d3942 * 0x1000 ==></b> <b class="green">0x00007ff7d39420b0</b> which gives us our "real" UM base address of our process.
+E.g. for the last VAD, we'll take <b>0x7ff7d3942 * 0x1000 ==></b> <b class="green">0x00007ff7d3942000</b> which gives us our "real" UM base address of our process.
 
 My problem was:
 If a page is only 4KB, and a "section" can describe more than 4KB (obviously), how does the operating system know what PTEs to *actually use* for a VAD?
