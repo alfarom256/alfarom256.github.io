@@ -188,9 +188,9 @@ int main() {
 <p>
 
 Tl;dr: the UM program takes in a UM pointer and passes it off to the driver, which will return it's PA.
-So we know each process has a VAD within a process. We can find the "root" node (VadRoot) in the EPROCESS structure for the target process.
+So we know each process has a VAD, and we can find the "root" node (VadRoot) in the EPROCESS structure for the target process.
 
-SPEAKING OF target processes, let's look at the EPROCESS structure which we'll use to access the VAD:
+SPEAKING OF target processes, let's look at the EPROCESS structure which we'll use to access the VadRoot:
 </p>
     
     <pre class="code">
@@ -268,7 +268,7 @@ We can confirm this by displaying the bytes at that address, plus our offset:
 
 <p>So we know where it is in physical memory, we know how to find the PTE in the debugger... Now what?
 
-Let's take a trip back up to the VAD to find our target VAD, and see what a VAD node actually describes.
+Let's take a trip back up to the VAD to find our target VadRoot Node, and see what a VAD actually describes.
 </p>
 
 <pre class="code">
@@ -292,7 +292,7 @@ Total VADs: 26, average level: 4, maximum depth: 5
 Total private commit: 0xa3 pages (652 KB)
 Total shared commit:  0x3a pages (232 KB)
 </pre>
-<p>The highlighted VAD covers the (adjusted) usermode range in our process between <b class="green">0x7ff7d3810000</b> and <b class="green">0x7ff7d39870000</b>
+<p>The highlighted VAD Node covers the (adjusted) usermode range in our process between <b class="green">0x7ff7d3810000</b> and <b class="green">0x7ff7d39870000</b>
 
 Refer back to our dummy_data UMVA:
 <b>0x00007ff7d3942</b><b class="green">0b0</b>
@@ -300,7 +300,7 @@ Refer back to our dummy_data UMVA:
 Wouldn't you know it, our UMVA fits right in that range! Sick!
 So now we have our target VAD!
 
-By examining the VAD we see....
+By examining the VAD Node we see....
 </p>
 
 <pre class="code">0: kd&gt; dt nt!_MMVAD ffff81822334e2a0
@@ -323,7 +323,7 @@ Via forbidden magic and rituals involving replacing my CPU's coolant with holy w
 
 Yes! Yes indeed!
 
-The _SUBSECTION member of the VAD is confusing (to me), but through examining, I found that the _SUBSECTION member is a linked list where every node contains a pointer to an array of PTEs!
+The _SUBSECTION member of a VAD Node is confusing (to me), but through examining, I found that the _SUBSECTION member is a linked list where every node contains a pointer to an array of PTEs!
 </p>
 <pre class="code">
 0: kd> dx -id 0,0,ffff818223b1c080 -r1 ((ntkrnlmp!_SUBSECTION *)0xffff818221190930)
@@ -344,7 +344,7 @@ The _SUBSECTION member of the VAD is confusing (to me), but through examining, I
     [+0x034 (31:31)] DirtyPages       : 0x0 [Type: unsigned long]
 </pre>
 
-<p>Taking the start of the VA from the VAD (<b class="green">0x7ff7d3810</b>) and our UMVA (<b>0x00007ff7d3942</b><b class="green">0b0</b>), we'll subtract the UMVA without the offset bits (<b class="green">0b0</b>) from the VAD Start VA.
+<p>Taking the start of the VA from the VAD Node (<b class="green">0x7ff7d3810</b>) and our UMVA (<b>0x00007ff7d3942</b><b class="green">0b0</b>), we'll subtract the UMVA without the offset bits (<b class="green">0b0</b>) from the VadRoot's Start VA.
 
 <b>0x00007ff7d3942</b> - <b class="green">0x7ff7d3810</b> = 0x132 (306)
 
@@ -467,7 +467,7 @@ So our driver must do the following:
 
 1. Get the byte offset of the UMVA. <b class="green">0x0b0</b>
 2. Get the adjusted range we'll be looking for (UMVA / 0x1000). <b>0x00007ff7d3942</b>
-3. Find which VAD our adjusted range fits into: <b>ffff81822334e2a0</b> (from the previously shown VAD)
+3. Find which VAD (VadRoot) our adjusted range fits into: <b>ffff81822334e2a0</b> (from the previously shown VAD)
 4. Walk the PTEs that VAD describes and find our target Page
 5. Add our offset
 6. Bingo bango bongo we have memory in the Congo 
