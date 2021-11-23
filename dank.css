@@ -74,6 +74,13 @@ li {
     list-style-type: none;
 }
 
+li.linkie {
+    color: #74b9ff;
+    font-family: 'Source Code Pro', monospace;
+    font-size: small;
+    list-style-type: none;
+}
+
 a {
     color:#ffeaa7;
 }

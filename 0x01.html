@@ -12,6 +12,9 @@
 <!--
     Ascii art thanks to
     https://fsymbols.com/generators/carty/
+
+
+    HEY I SAID STOP LOOKING AT MY HAND-JAMMED SHITTY HTML
 -->
 
 █████████████████████
@@ -20,8 +23,548 @@
 ▀▄▄▄▄▀▄▄█▄▄▀▄▄▄▄▀▄▄▄▀
         </pre>
     </div>
-    <h2>👷 Soon 👷</h2>
+    <h2>What's in a VAD? User VA to Physical Address!</h2>
     </center>
+    <div style="width: 60%;">
+        <h3>Intro</h3>
+        <p>
+Rabbit holes, am I right?<br> 
+Recently, I have been bothered by my lack of undersanding of the inner workings of the Windows Kernel's memory manager.
+Luckily, having just completed trainings by CodeMachine and OSR empowered me to delve deeper into the arcane, magical world that is the Windows Kernel.
+I wanted to understand how, and by what mechanisms, does the kernel "resolve" a usermode virtual address (UVA) into it's real Physical Address (PA).
+I don't claim to be an expert or authority on Kernel programming or the Memory Manager by any means, and if there are errors in the following *please* make a pull request.
+I am super, super excited to just learn more about the kernel.<br>
+
+Much incredible work has been done already to describe this process, and without the following posts (in no particular order), I would not have been able to accomplish my task:<br>
+</p>
+<ol> <!-- lmao @ "in no particular order" but uses <ol> -->
+    <li class="linkie">https://www.tophertimzen.com/resources/cs407/slides/week03_01-MemoryInternals.html</li>
+    <li class="linkie">https://www.geoffchappell.com/studies/windows/km/ntoskrnl/api/mm/mi/mmpte/index.htm</li>
+    <li class="linkie">http://lilxam.tuxfamily.org/blog/?p=326&lang=en</li>
+    <li class="linkie">https://www.triplefault.io/2017/08/exploring-windows-virtual-memory.html</li>
+    <li class="linkie">https://www.triplefault.io/2017/07/introduction-to-ia-32e-hardware-paging.html</li>
+    <li class="linkie">https://codemachine.com/articles/kernel_structures.html#MMVAD</li>
+    <li class="linkie">https://www.unknowncheats.me/forum/general-programming-and-reversing/359882-easy-getting-vad-pte.html</li>
+    <li class="linkie">https://ch3rn0byl.com/2021/05/a-dell-cve-2021-21551/</li>
+    <li class="linkie">https://docs.microsoft.com/en-us/archive/blogs/ntdebugging/understanding-pte-part-1-lets-get-physical</li>
+    <li class="linkie">https://connormcgarr.github.io/pte-overwrites/</li>
+    <li class="linkie">https://github.com/Cr4sh/PTBypass-PoC</li>
+</ol>
+
+<p>
+Shoutout to ch3rn0byl and s4r1n, some real ones right there.
+</p>
+<h3>Objective</h3>
+<p>The purpose of my small project was to understand the inner workings of the kernel that are responsible for translating a UMVA into the PA. 
+After finishing up my OSR class recently, I wanted to know more about how VADs <i>actually worked under the hood</i>, and how the kernel leverages them to describe the PTEs associated with a section.
+Of course, you can't really go far when talking about memory management in the kernel without talking about PTEs, PML4, PDPTEs, etc. 
+Arming myself with the knowledge from the above links (read them, and if you wrote them, "hi!") I set out to take a deeper dive into the VAD.
+</p>
+<h3>What is a VAD?</h3>
+<p>In short (and so I don't shoot myself in the foot), the Virtual Address Descriptor (VAD) is an <a href="https://en.wikipedia.org/wiki/AVL_tree">AVL Tree</a>, where each node describes a region of memory allocated within the target process.
+
+We can see the VADs associated with a process from within WinDbg Preview with dark-mode enabled, by issuing the following commands:
+</p>
+<pre class="code">
+0: kd> .process /p 0xffff818223b1c080
+Implicit process is now ffff8182`23b1c080
+.cache forcedecodeuser done
+0: kd> !vad
+VAD             Level         Start             End              Commit
+ffff81822402b840  4           7ffe0           7ffe0               1 Private      READONLY           
+ffff81822402b3e0  3           7ffe2           7ffe2               1 Private      READONLY           
+ffff81822402bb60  2         6baf600         6baf7ff               3 Private      READWRITE          
+ffff81822402b8e0  4         6baf800         6baf8ff               6 Private      READWRITE          
+ffff81822334eac0  3        21104640        2110464f               0 Mapped       READWRITE          Pagefile section, shared commit 0x10
+ffff81822334f7e0  4        21104650        21104652               0 Mapped       READONLY           \Windows\System32\l_intl.nls
+ffff81822334f740  1        21104660        2110467e               0 Mapped       READONLY           Pagefile section, shared commit 0x1f
+ffff81822334f100  3        21104680        21104683               0 Mapped       READONLY           Pagefile section, shared commit 0x4
+ffff81822334ed40  4        21104690        21104690               0 Mapped       READONLY           Pagefile section, shared commit 0x1
+ffff81822402bd90  2        211046a0        211046a1               2 Private      READWRITE          
+ffff81822334e700  3        211046b0        211046c0               0 Mapped       READONLY           \Windows\System32\C_1252.NLS
+ffff81822334f1a0  0        211046d0        211046e0               0 Mapped       READONLY           \Windows\System32\C_437.NLS
+ffff81822334ee80  4        211046f0        211046f2               0 Mapped       READONLY           \Windows\System32\l_intl.nls
+ffff81822402bcf0  3        21104700        2110470c               1 Private      READWRITE          
+ffff81822334f380  4        21104710        21104720               0 Mapped       READONLY           \Windows\System32\C_1252.NLS
+ffff81822334eb60  5        21104730        21104740               0 Mapped       READONLY           \Windows\System32\C_437.NLS
+ffff81822402bd40  2        21104750        2110484f              15 Private      READWRITE          
+ffff81822334f2e0  5        21104850        2110491d               0 Mapped       READONLY           \Windows\System32\locale.nls
+ffff81822334ef20  4       7ff428360       7ff42845f               0 Mapped       READONLY           Pagefile section, shared commit 0x5
+ffff81822402bca0  3       7ff428460       7ff52847f               0 Private      READWRITE          
+ffff81822402bbb0  4       7ff528480       7ff52a480               1 Private      READWRITE          
+ffff81822334d9e0  1       7ff52a490       7ff52a490               0 Mapped       READONLY           Pagefile section, shared commit 0x1
+ffff81822334e2a0  3       7ff7d3810       7ff7d3987             103 Mapped  Exe  EXECUTE_WRITECOPY  \vmware-host\Shared Folders\repos\PMLE4-Stuff\x64\Debug\PML4User.exe
+ffff81822334f9c0  4       7ffda9e70       7ffdaa1e3               8 Mapped  Exe  EXECUTE_WRITECOPY  \Windows\System32\KernelBase.dll
+ffff81822334e980  2       7ffdab5c0       7ffdab67c               7 Mapped  Exe  EXECUTE_WRITECOPY  \Windows\System32\kernel32.dll
+ffff81822334d800  3       7ffdac4c0       7ffdac6c6              15 Mapped  Exe  EXECUTE_WRITECOPY  \Windows\System32\ntdll.dll
+
+Total VADs: 26, average level: 4, maximum depth: 5
+Total private commit: 0xa3 pages (652 KB)
+Total shared commit:  0x3a pages (232 KB)
+</pre>
+<p>What you see is a list of VADs, and the associated ranges they represent within the target process. Within each VAD, we should expect a list of PTEs that correspond to that segment.
+"Well, those Start and End colums look kinda like addresses... but why are they truncated?" you may ask. And good question!
+Without going too much into detail about address translation, we know the size of a page is <b>0x1000 (4096, 4kb)</b> bytes, and we also know the last 12 bits of an address index into the page for the actual memory.
+
+By multiplying the Start and End values by 0x1000, we will find the values actually represented in user-mode (UM).
+
+E.g. for the last VAD, we'll take <b>0x7ffdac4c0 * 0x1000 ==></b> <b class="green">0x7ffdac4c0000</b> which gives us our "real" UM base address of ntdll.
+
+The problem, for my sake, was:
+If a page is only 4KB, and a "section" can describe more than 4KB (obviously), how does the operating system know what PTEs to *actually use* for a VAD?
+VADs are explicitly designed to be "easier" to manage, after all.
+
+So how could I take some arbitrary user address and map it to it's physical address?
+
+Let's break down the UMVA 0x7ffdac4c34b0 (something random within ntdll).
+
+<b>0x7ffdac4c3</b><b class="green">4b0</b>
+<b>0111 1111 1111 1101 1010 1100 0100 1100 0011</b><b class="green"> 0100 1011 0000</b>
+
+We know the offset into the PA is the last 12b (0x4b0).
+We know the VAD describing ntdll STARTS at the UMVA 0x7ffdac4c0000.
+We can find yet another "offset" into this region of memory by subtracting our UMVA by the UMVA of ntdll's base:
+
+(our pointer) 0x7ffdac4c34b0 - (ntdll base) 0x7ffdac4c0000 = (offset) 0x34b0
+
+Knowing a page is 0x1000 in size, we can divide 0x34b0 by 0x1000 to know how many pages "into ntdll" we will be:
+
+0x34b0 / 0x1000 = 3, aka the third page
+
+Now we know that within the third page describing ntdll, we are 0x4b0 bytes offset (the remainder) into the page.
+
+Boom, viola. I guess? 
+Now we at least have a recipe to get what we're after...
+</p>
+
+<h3>Okay, let's dig in</h3>
+
+<p>Suppose I have a driver, and corresponding UM program where the UM program will pass a UMVA to the driver, which will return it's physical page.
+
+<b>User Program</b>
+</p>
+<pre class="code">
+#include &lt;Windows.h&gt;
+#include &lt;stdio.h&gt;
+#include "..\PMLE4-Stuff\DriverCommon.h"
+
+int main() {
+    HANDLE hDevice = CreateFileA(
+        "\\\\.\\pml",
+        GENERIC_READ,
+        FILE_SHARE_WRITE | FILE_SHARE_READ,
+        NULL,
+        OPEN_EXISTING,
+        0,
+        NULL
+    );
+
+    if (!hDevice) {
+        printf("Could not open handle : %d\n", GetLastError());
+        return -1;
+    }
+
+    <b class="green">// take a pointer to some data</b>
+    const char* dummy_data = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    DWORD64 userVirtual = (DWORD64)dummy_data;
+    DWORD dwBytesReturned = 0;
+
+    <b class="green">// pass it off to the driver</b>
+    BOOL res = DeviceIoControl(hDevice, IOCTL_VIRT_TO_PHYS, &userVirtual, sizeof(DWORD64), &userVirtual, sizeof(DWORD64), &dwBytesReturned, NULL);
+    if (!res) {
+        printf("DeviceIoControl Failed : %d\n", GetLastError());
+    }
+
+    <b class="green">// print the returned physical address</b>
+    printf("%p has physical address of %p\n", dummy_data, userVirtual);
+    return 1;
+}
+</pre>
+
+<b>Driver:</b>
+<p><a href="https://github.com/alfarom256/UserVAtoPhysical/tree/main/PMLE4-Stuff">Link to the repo because I'm WAY too lazy to hand-jam more html</a></p>
+
+<p>
+
+Tl;dr: the UM program takes in a UM pointer and passes it off to the driver, which will return it's PA.
+So we know each process has a VAD within a process. We can find the "root" node (VadRoot) in the EPROCESS structure for the target process.
+
+SPEAKING OF target processes, let's look at the EPROCESS structure which we'll use to access the VAD:
+</p>
+    
+    <pre class="code">
+0: kd> dt nt!_EPROCESS
++0x000 Pcb              : _KPROCESS
++0x438 ProcessLock      : _EX_PUSH_LOCK
+... TRUNCATED
+<b class="green">+0x7d8 VadRoot          : _RTL_AVL_TREE</b>
++0x7e0 VadHint          : Ptr64 Void
++0x7e8 VadCount         : Uint8B
++0x7f0 VadPhysicalPages : Uint8B
++0x7f8 VadPhysicalPagesLimit : Uint8B
+... TRUNCATED
+    </pre>
+
+<p>Anyone with a working set of peepers can notice that the VadRoot is at offset EPROCESS + 0x7d8.
+So let's do a little walkthrough of our simple user program and driver to see how this all works in action, and how we can walk the VAD to find our target PTE.
+
+In our UM program, we pass the address of <b>dummy_data</b> to our driver, which gives us the UMVA of:
+
+dummy_data : <b>0x00007ff7d3942</b><b class="green">0b0</b>
+
+By going back into our debugger and issuing the <b>!pte</b> command, we can view the PTE for our target address and save it off for later.
+</p>
+<pre class="code">
+0: kd> <b>!pte 0x00007ff7d3942</b><b class="green">0b0</b>
+VA <b>00007ff7d3942</b><b class="green">0b0</b>
+PXE at FFFFCDE6F379B7F8    PPE at FFFFCDE6F36FFEF8    PDE at FFFFCDE6DFFDF4E0    <b class="green">PTE at FFFFCDBFFBE9CA10</b>
+contains 0A000001C822F867  contains 0A0000011B730867  contains 0A00000122331867  contains 8600000209238025
+pfn 1c822f    ---DA--UWEV  pfn 11b730    ---DA--UWEV  pfn 122331    ---DA--UWEV  pfn 209238    ----A--UR-V
+</pre>
+<p>Great! Now that we know the PTE that contains our data, let's examine the type in the debugger!</p>
+<pre class="code">
+0: kd> dt nt!_MMPTE_HARDWARE FFFFCDBFFBE9CA10
+    +0x000 Valid            : 0y1
+    +0x000 Dirty1           : 0y0
+    +0x000 Owner            : 0y1
+    +0x000 WriteThrough     : 0y0
+    +0x000 CacheDisable     : 0y0
+    +0x000 Accessed         : 0y1
+    +0x000 Dirty            : 0y0
+    +0x000 LargePage        : 0y0
+    +0x000 Global           : 0y0
+    +0x000 CopyOnWrite      : 0y0
+    +0x000 Unused           : 0y0
+    +0x000 Write            : 0y0
+    +0x000 PageFrameNumber  : 0y0000000000000000001000001001001000111000 <b class="green">(0x209238) <- note this</b>
+    +0x000 ReservedForSoftware : 0y0000
+    +0x000 WsleAge          : 0y0110
+    +0x000 WsleProtection   : 0y000
+    +0x000 NoExecute        : 0y1
+</pre>
+<p>
+The Page Frame Number <b class="green">0x209238</b>, when multiplied by <b class="green">0x1000 (or whatever page size)</b> will give us the PA of the beginning of the page.
+So the ACTUAL PA lives at <b class="green">0x209238000</b>
+
+From our previous steps, we know the offset into the page is the last 12b of our VA:
+<b>0x00007ff7d3942</b><b class="green">0b0</b>
+
+Offset: <b class="green">0x0b0</b>
+
+We can confirm this by displaying the bytes at that address, plus our offset:
+</p>
+<pre class="code">
+0: kd> !db 0x209238000 + 0x0b0
+<b class="green">#2092380b0 61 61 61 61 61 61 61 61-61 61 61 61 61 61 61 61 aaaaaaaaaaaaaaaa
+#2092380c0 61 61 61 61 61 61 61 61-61 61 61 61 61 61 61 61 aaaaaaaaaaaaaaaa
+#2092380d0 61 61 61</b> 00 00 00 00 00-00 00 00 00 00 00 00 00 <b class="green">aaa</b>.............
+#2092380e0 44 65 76 69 63 65 49 6f-43 6f 6e 74 72 6f 6c 20 DeviceIoControl 
+#2092380f0 46 61 69 6c 65 64 20 3a-20 25 64 0a 00 00 00 00 Failed : %d.....
+#209238100 00 00 00 00 00 00 00 00-25 70 20 68 61 73 20 70 ........%p has p
+#209238110 68 79 73 69 63 61 6c 20-61 64 64 72 65 73 73 20 hysical address 
+#209238120 6f 66 20 25 70 0a 00 00-00 00 00 00 00 00 00 00 of %p...........
+</pre>
+
+<p>So we know where it is in physical memory, we know how to find the PTE in the debugger... Now what?
+
+Let's take a trip back up to the VAD to find our target VAD, and see what a VAD node actually describes.
+</p>
+
+<pre class="code">
+0: kd> !vad
+VAD             Level         Start             End              Commit
+ffff81822402b840  4           7ffe0           7ffe0               1 Private      READONLY           
+ffff81822402b3e0  3           7ffe2           7ffe2               1 Private      READONLY           
+ffff81822402bb60  2         6baf600         6baf7ff               3 Private      READWRITE        
+...
+... BORING! TRUNCATED!
+...
+ffff81822402bca0  3       7ff428460       7ff52847f               0 Private      READWRITE          
+ffff81822402bbb0  4       7ff528480       7ff52a480               1 Private      READWRITE          
+ffff81822334d9e0  1       7ff52a490       7ff52a490               0 Mapped       READONLY           Pagefile section, shared commit 0x1
+<b class="green">ffff81822334e2a0  3       7ff7d3810       7ff7d3987             103 Mapped  Exe  EXECUTE_WRITECOPY  \vmware-host\Shared Folders\repos\PMLE4-Stuff\x64\Debug\PML4User.exe</b>
+ffff81822334f9c0  4       7ffda9e70       7ffdaa1e3               8 Mapped  Exe  EXECUTE_WRITECOPY  \Windows\System32\KernelBase.dll
+ffff81822334e980  2       7ffdab5c0       7ffdab67c               7 Mapped  Exe  EXECUTE_WRITECOPY  \Windows\System32\kernel32.dll
+ffff81822334d800  3       7ffdac4c0       7ffdac6c6              15 Mapped  Exe  EXECUTE_WRITECOPY  \Windows\System32\ntdll.dll
+
+Total VADs: 26, average level: 4, maximum depth: 5
+Total private commit: 0xa3 pages (652 KB)
+Total shared commit:  0x3a pages (232 KB)
+</pre>
+<p>The highlighted VAD covers the (adjusted) usermode range in our process between <b class="green">0x7ff7d3810000</b> and <b class="green">0x7ff7d39870000</b>
+
+Refer back to our dummy_data UMVA:
+<b>0x00007ff7d3942</b><b class="green">0b0</b>
+
+Wouldn't you know it, our UMVA fits right in that range! Sick!
+So now we have our target VAD!
+
+By examining the VAD we see....
+</p>
+
+<pre class="code">0: kd&gt; dt nt!_MMVAD ffff81822334e2a0
+    +0x000 Core             : _MMVAD_SHORT
+    +0x040 u2               : &lt;unnamed-tag&gt;
+    +0x048 Subsection       : 0xffff8182`21190930 _SUBSECTION
+    +0x050 FirstPrototypePte : 0xffffe588`afe79050 _MMPTE
+    +0x058 LastContiguousPte : 0xffffe588`afe79c08 _MMPTE
+    +0x060 ViewLinks        : _LIST_ENTRY [ 0xffff8182`240a4480 - 0xffff8182`211908b8 ]
+    +0x070 VadsProcess      : 0xffff8182`23b1c081 _EPROCESS
+    +0x078 u4               : &lt;unnamed-tag&gt;
+    +0x080 FileObject       : 0xffff8182`23875b60 _FILE_OBJECT
+</pre>
+<p>
+Well we don't get much right off the bat.
+BUT FEAR NOT!
+
+Via arcane magic and rituals involving replacing my CPU's coolant with holy water, we can think back and go:
+"Jeez, well if a 'section' of memory is comprised of multiple pages, and the VAD describes those pages, then surely a member of the VAD should show us where to go right?"
+
+Yes! Yes indeed!
+
+The _SUBSECTION member of the VAD is confusing (to me), but through examining, I found that the _SUBSECTION member is a linked list where every node contains a pointer to an array of PTEs!
+</p>
+<pre class="code">
+0: kd> dx -id 0,0,ffff818223b1c080 -r1 ((ntkrnlmp!_SUBSECTION *)0xffff818221190930)
+    ((ntkrnlmp!_SUBSECTION *)0xffff818221190930)                 : 0xffff818221190930 [Type: _SUBSECTION *]
+    [+0x000] ControlArea      : 0xffff8182211908b0 [Type: _CONTROL_AREA *]
+    <b class="green">[+0x008] SubsectionBase   : 0xffffe588afe79050 [Type: _MMPTE *]</b>
+    [+0x010] NextSubsection   : 0xffff818221190968 [Type: _SUBSECTION *]
+    [+0x018] GlobalPerSessionHead [Type: _RTL_AVL_TREE]
+    [+0x018] CreationWaitList : 0x0 [Type: _MI_CONTROL_AREA_WAIT_BLOCK *]
+    [+0x018] SessionDriverProtos : 0x0 [Type: _MI_PER_SESSION_PROTOS *]
+    [+0x020] u                [Type: &lt;unnamed-tag&gt;]
+    [+0x024] StartingSector   : 0x0 [Type: unsigned long]
+    [+0x028] NumberOfFullSectors : 0x2 [Type: unsigned long]
+    <b class="green">[+0x02c] PtesInSubsection : 0x1 [Type: unsigned long]</b> 
+    [+0x030] u1               [Type: &lt;unnamed-tag&gt;]
+    [+0x034 (29: 0)] UnusedPtes       : 0x0 [Type: unsigned long]
+    [+0x034 (30:30)] ExtentQueryNeeded : 0x0 [Type: unsigned long]
+    [+0x034 (31:31)] DirtyPages       : 0x0 [Type: unsigned long]
+</pre>
+
+<p>Taking the start of the VA from the VAD (<b class="green">0x7ff7d3810</b>) and our UMVA (<b>0x00007ff7d3942</b><b class="green">0b0</b>), we'll subtract the UMVA without the offset bits (<b class="green">0b0</b>) from the VAD Start VA.
+
+<b>0x00007ff7d3942</b> - <b class="green">0x7ff7d3810</b> = 0x132 (306)
+
+This means, with a page size of 0x1000, our target data lies within the 306th page!
+Sweet!
+Thankfully our _SUBSECTION list contains a member which tells us the amount of PTEs contained in a subsection.
+So all we need to do is walk the list of _SUBSECTIONs until we find the one containing the 306th page, subtracting the page count from 306 until the page count of the current _SUBSECTION is greater than the remaining page count.
+Then, we'll take the SubsectionBase, and use the remainder to index into the SubsectionBase PTE array.
+</p>
+<pre class="code">
+    0: kd> dx -id 0,0,ffff818223b1c080 -r1 ((ntkrnlmp!_SUBSECTION *)0xffff818221190930)
+        ((ntkrnlmp!_SUBSECTION *)0xffff818221190930)                 : 0xffff818221190930 [Type: _SUBSECTION *]
+        [+0x000] ControlArea      : 0xffff8182211908b0 [Type: _CONTROL_AREA *]
+        [+0x008] SubsectionBase   : 0xffffe588afe79050 [Type: _MMPTE *]
+        [+0x010] NextSubsection   : 0xffff818221190968 [Type: _SUBSECTION *]
+        [+0x018] GlobalPerSessionHead [Type: _RTL_AVL_TREE]
+        [+0x018] CreationWaitList : 0x0 [Type: _MI_CONTROL_AREA_WAIT_BLOCK *]
+        [+0x018] SessionDriverProtos : 0x0 [Type: _MI_PER_SESSION_PROTOS *]
+        [+0x020] u                [Type: &lt;unnamed-tag&gt;]
+        [+0x024] StartingSector   : 0x0 [Type: unsigned long]
+        [+0x028] NumberOfFullSectors : 0x2 [Type: unsigned long]
+        <b class="green">[+0x02c] PtesInSubsection : 0x1 [Type: unsigned long]</b> <b>306 - 1 = 305</b>
+        [+0x030] u1               [Type: &lt;unnamed-tag&gt;]
+        [+0x034 (29: 0)] UnusedPtes       : 0x0 [Type: unsigned long]
+        [+0x034 (30:30)] ExtentQueryNeeded : 0x0 [Type: unsigned long]
+        [+0x034 (31:31)] DirtyPages       : 0x0 [Type: unsigned long]
+    
+    0: kd> dx -id 0,0,ffff818223b1c080 -r1 ((ntkrnlmp!_SUBSECTION *)0xffff818221190968)
+        ((ntkrnlmp!_SUBSECTION *)0xffff818221190968)                 : 0xffff818221190968 [Type: _SUBSECTION *]
+        [+0x000] ControlArea      : 0xffff8182211908b0 [Type: _CONTROL_AREA *]
+        [+0x008] SubsectionBase   : 0xffffe588afe79058 [Type: _MMPTE *]
+        [+0x010] NextSubsection   : 0xffff8182211909a0 [Type: _SUBSECTION *]
+        [+0x018] GlobalPerSessionHead [Type: _RTL_AVL_TREE]
+        [+0x018] CreationWaitList : 0x0 [Type: _MI_CONTROL_AREA_WAIT_BLOCK *]
+        [+0x018] SessionDriverProtos : 0x0 [Type: _MI_PER_SESSION_PROTOS *]
+        [+0x020] u                [Type: &lt;unnamed-tag&gt;]
+        [+0x024] StartingSector   : 0x0 [Type: unsigned long]
+        [+0x028] NumberOfFullSectors : 0x0 [Type: unsigned long]
+        <b class="green">[+0x02c] PtesInSubsection : 0x61 [Type: unsigned long]</b> <b>305 - 97 = 208</b>
+        [+0x030] u1               [Type: &lt;unnamed-tag&gt;]
+        [+0x034 (29: 0)] UnusedPtes       : 0x0 [Type: unsigned long]
+        [+0x034 (30:30)] ExtentQueryNeeded : 0x0 [Type: unsigned long]
+        [+0x034 (31:31)] DirtyPages       : 0x0 [Type: unsigned long]
+    
+    0: kd> dx -id 0,0,ffff818223b1c080 -r1 ((ntkrnlmp!_SUBSECTION *)0xffff8182211909a0)
+        ((ntkrnlmp!_SUBSECTION *)0xffff8182211909a0)                 : 0xffff8182211909a0 [Type: _SUBSECTION *]
+        [+0x000] ControlArea      : 0xffff8182211908b0 [Type: _CONTROL_AREA *]
+        [+0x008] SubsectionBase   : 0xffffe588afe79360 [Type: _MMPTE *]
+        [+0x010] NextSubsection   : 0xffff8182211909d8 [Type: _SUBSECTION *]
+        [+0x018] GlobalPerSessionHead [Type: _RTL_AVL_TREE]
+        [+0x018] CreationWaitList : 0x0 [Type: _MI_CONTROL_AREA_WAIT_BLOCK *]
+        [+0x018] SessionDriverProtos : 0x0 [Type: _MI_PER_SESSION_PROTOS *]
+        [+0x020] u                [Type: &lt;unnamed-tag&gt;]
+        [+0x024] StartingSector   : 0x2 [Type: unsigned long]
+        [+0x028] NumberOfFullSectors : 0x677 [Type: unsigned long]
+        <b class="green">[+0x02c] PtesInSubsection : 0xcf [Type: unsigned long]</b><b> 208 - 207 = 1</b>
+        [+0x030] u1               [Type: &lt;unnamed-tag&gt;]
+        [+0x034 (29: 0)] UnusedPtes       : 0x0 [Type: unsigned long]
+        [+0x034 (30:30)] ExtentQueryNeeded : 0x0 [Type: unsigned long]
+        [+0x034 (31:31)] DirtyPages       : 0x0 [Type: unsigned long]
+    
+    0: kd> dx -id 0,0,ffff818223b1c080 -r1 ((ntkrnlmp!_SUBSECTION *)0xffff8182211909d8)
+        ((ntkrnlmp!_SUBSECTION *)0xffff8182211909d8)                 : 0xffff8182211909d8 [Type: _SUBSECTION *]
+        [+0x000] ControlArea      : 0xffff8182211908b0 [Type: _CONTROL_AREA *]
+        <b class="green">[+0x008] SubsectionBase   : 0xffffe588afe799d8 [Type: _MMPTE *]</b>
+        [+0x010] NextSubsection   : 0xffff818221190a10 [Type: _SUBSECTION *]
+        [+0x018] GlobalPerSessionHead [Type: _RTL_AVL_TREE]
+        [+0x018] CreationWaitList : 0x0 [Type: _MI_CONTROL_AREA_WAIT_BLOCK *]
+        [+0x018] SessionDriverProtos : 0x0 [Type: _MI_PER_SESSION_PROTOS *]
+        [+0x020] u                [Type: &lt;unnamed-tag&gt;]
+        [+0x024] StartingSector   : 0x679 [Type: unsigned long]
+        [+0x028] NumberOfFullSectors : 0x186 [Type: unsigned long]
+        <b class="green">[+0x02c] PtesInSubsection : 0x31 [Type: unsigned long]</b> <b> 1 < 49! We found our target _SUBSECTION!!!</b>
+        [+0x030] u1               [Type: &lt;unnamed-tag&gt;]
+        [+0x034 (29: 0)] UnusedPtes       : 0x0 [Type: unsigned long]
+        [+0x034 (30:30)] ExtentQueryNeeded : 0x0 [Type: unsigned long]
+        [+0x034 (31:31)] DirtyPages       : 0x0 [Type: unsigned long]
+</pre>
+<p>By indexing into the second element of the array pointed to by _SUBSECTION.SubsectionBase, we can find our target PTE!!</p>
+<pre class="code">
+0: kd> dq 0xffffe588afe799d8
+ffffe588`afe799d8  8a000001`cb735121 <b class="green">8a000002`09238121</b>
+ffffe588`afe799e8  00000001`2c737820 8a000001`17392121
+ffffe588`afe799f8  00000001`8ca96820 00000001`da595820
+
+0: kd> dt nt!_MMPTE_HARDWARE (ffffe588`afe799d8 + <b class="green">8</b>)
+    +0x000 Valid            : 0y1
+    +0x000 Dirty1           : 0y0
+    +0x000 Owner            : 0y0
+    +0x000 WriteThrough     : 0y0
+    +0x000 CacheDisable     : 0y0
+    +0x000 Accessed         : 0y1
+    +0x000 Dirty            : 0y0
+    +0x000 LargePage        : 0y0
+    +0x000 Global           : 0y1
+    +0x000 CopyOnWrite      : 0y0
+    +0x000 Unused           : 0y0
+    +0x000 Write            : 0y0
+    +0x000 PageFrameNumber  : 0y0000000000000000001000001001001000111000 <b class="green">(0x209238)</b>
+    +0x000 ReservedForSoftware : 0y0000
+    +0x000 WsleAge          : 0y1010
+    +0x000 WsleProtection   : 0y000
+    +0x000 NoExecute        : 0y1
+</pre>
+<p>Let's confirm by displayin the bytes again and...</p>
+<pre class="code">
+0: kd> !db 0x209238000 + 0x0b0
+<b class="green">#2092380b0 61 61 61 61 61 61 61 61-61 61 61 61 61 61 61 61 aaaaaaaaaaaaaaaa
+#2092380c0 61 61 61 61 61 61 61 61-61 61 61 61 61 61 61 61 aaaaaaaaaaaaaaaa
+#2092380d0 61 61 61</b> 00 00 00 00 00-00 00 00 00 00 00 00 00 <b class="green">aaa</b>.............
+#2092380e0 44 65 76 69 63 65 49 6f-43 6f 6e 74 72 6f 6c 20 DeviceIoControl 
+#2092380f0 46 61 69 6c 65 64 20 3a-20 25 64 0a 00 00 00 00 Failed : %d.....
+#209238100 00 00 00 00 00 00 00 00-25 70 20 68 61 73 20 70 ........%p has p
+#209238110 68 79 73 69 63 61 6c 20-61 64 64 72 65 73 73 20 hysical address 
+#209238120 6f 66 20 25 70 0a 00 00-00 00 00 00 00 00 00 00 of %p...........
+</pre>
+<p>Yaaaay. We did it. Woo.
+
+So our driver must do the following:
+
+1. Get the byte offset of the UMVA. <b class="green">0x0b0</b>
+2. Get the adjusted range we'll be looking for (UMVA / 0x1000). <b>0x00007ff7d3942</b>
+3. Find which VAD our adjusted range fits into: <b>ffff81822334e2a0</b> (from the previously shown VAD)
+4. Walk the PTEs that VAD describes and find our target Page
+5. Add our offset
+6. Bingo bango bongo we have memory in the Congo 
+
+With aaaaaaaaaaaaaaall of that in mind, I present the function I wrote to do just this!
+</p>
+<b>PML4.cpp (yes, the project name isn't accurate, I'll rebase later)</b>
+<pre class="code">_Use_decl_annotations_
+NTSTATUS ManualVirtualToPhys(PVOID lpSystemBuffer, PULONG pcbWritten){
+    DWORD64 lpAddress = *(PDWORD64)lpSystemBuffer; <b class="green">// lpAddress is equal to dummy_data!</b>
+
+    ULONG byteIndexIntoPhys = lpAddress & 0xFFF; <b class="green">// the last three bytes indicate the offset into the pte's described page</b>
+
+    <b class="green">// the userAddressVpn gives us the range we'll need when we look for the VAD </b>
+    <b class="green">// this fits into, or rather that the userAddressVpn fits between it's Start (startVpn) and End (endVpn)</b>
+    DWORD64 userAddressVpn = (lpAddress & 0xFFFFFFFFFFFFF000) / 0x1000;
+
+    PEPROCESS pCurrentProcess = IoGetCurrentProcess();
+
+    <b class="green">// Grab the root node, and make an iterator pointing to the root</b>
+    PVAD_NODE lpVadRoot = *(PVAD_NODE*)((uintptr_t)pCurrentProcess + 0x7d8);
+    PVAD_NODE lpVadIter = lpVadRoot;
+    PVAD_NODE lpTargetVad = NULL;
+
+    <b class="green">// Walk the VAD tree</b>
+    while (lpVadIter) {
+            
+        DWORD64 start_va_adjusted = get_adjusted_va(TRUE, lpVadIter);
+        DWORD64 end_va_adjusted = get_adjusted_va(FALSE, lpVadIter);
+
+        <b class="green">// if the userAddressVpn is larger than the adjusted end_va</b>
+        <b class="green">// of the current VAD, we need to go to the right to get the </b>
+        <b class="green">// next "largest" entry in the tree</b>
+        if (userAddressVpn > end_va_adjusted) {
+            if (lpVadIter->Right == NULL) {
+                return STATUS_INVALID_DEVICE_REQUEST;
+            }
+            lpVadIter = lpVadIter->Right;
+        }
+
+        <b class="green">// if the userAddress vpn is SMALLER than the adjusted end_va</b>
+        <b class="green">// of the current VAD, we need to go to the right to get the </b>
+        <b class="green">// next "largest" entry in the tree </b>
+        else if (userAddressVpn < start_va_adjusted){
+            if (lpVadIter->Left == NULL) {
+                return STATUS_INVALID_DEVICE_REQUEST;
+            }
+            lpVadIter = lpVadIter->Left;
+        }
+        <b class="green">// if start_va < userAddress > end_va</b>
+        <b class="green">// we found the right VAD</b>
+        else {
+            lpTargetVad = lpVadIter;
+            break;
+        }
+    }
+
+    <b class="green">// this will give us the "count" of pages we need to iterate over</b>
+    <b class="green">// e.g. </b>
+    <b class="green">// vad_start = 0x1230</b>
+    <b class="green">// user_vpn = 0x1250</b>
+    <b class="green">// user_vpn - vad_start = 0x20</b>
+    <b class="green">// num_pages_to_skip = 0x20</b>
+    ULONG indexOfPage = (ULONG)(userAddressVpn - lpTargetVad->StartingVpn);
+
+    PVAD_SUBSECTION pSection = lpTargetVad->Subsection;
+    PVAD_SUBSECTION pTargetSection = NULL;
+    
+    while (pSection->NextSubsection != NULL) {
+        <b class="green">// if the index of the page is greater than the number of pages</b>
+        <b class="green">// in the current section, we've found the section that has the </b>
+        <b class="green">// pte that describes our target memory!</b>
+        if (indexOfPage < pSection->PtesInSubsection) {
+            pTargetSection = pSection;
+            break;
+        }
+
+        indexOfPage -= pSection->PtesInSubsection;
+        pSection = pSection->NextSubsection;
+    }
+
+    if (pTargetSection == NULL) {
+        return STATUS_NOT_FOUND;
+    }
+
+    <b class="green">// get the indexed pte</b>
+    DWORD64 targetPte = pTargetSection->SubsectionBase[indexOfPage];
+    DWORD64 pPte = ((targetPte >> 12) & 0xFFFFFFFFF) * 0x1000;
+    PVOID pPhysicalAddr = (PVOID)(pPte + (DWORD64)byteIndexIntoPhys);
+
+    <b class="green">// return the physical address back to the user</b>
+    *(DWORD64*)lpSystemBuffer = (DWORD64)pPhysicalAddr;
+    *pcbWritten = 8;
+    return STATUS_SUCCESS;
+}
+</pre>
+<p>Thanks for coming to my VAD talk.</p>
+    </div>
     </body>
     <footer>
             <center>
