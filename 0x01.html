@@ -110,13 +110,13 @@ VADs are explicitly designed to be "easier" to manage, after all.
 
 So how could I take some arbitrary user address and map it to it's physical address?
 
-Let's break down an example VA within our target process' image: 0x00007ff7d39420b0.
+Let's break down an example VA within our target process' image, a <b class="green">const char* dummy_data: 0x00007ff7d39420b0</b>. ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
 <b>0x00007ff7d3942</b><b class="green">0b0</b>
 <b>0111 1111 1111 0111 1101 0011 1001 0100 0010</b><b class="green"> 0000 1011 0000</b>
 
 We know the offset into the PA is the last 12b (0x0b0).
-We know the VAD/VadRoot describing our process STARTS at the UMVA 0x7ff7d3942000.
+We know the VAD/VadRoot describing our process STARTS at the adjusted UMVA 0x7ff7d3942000.
 We can find yet another "offset" into this region of memory by subtracting our UMVA by the UMVA of our process' base:
 
 (our pointer) 0x7ff7d39420b0 - (our process base) 0x7ff7d3810000 = (offset) 0x1320B0
@@ -152,8 +152,6 @@ Let's examine the EPROCESS structure which we'll use to access the VadRoot:
     </pre>
 
 <p>Anyone with a working set of peepers can notice that the VadRoot is at offset EPROCESS + 0x7d8.
-
-In our UM program, we pass the address of <b>dummy_data</b> to our driver, giving us our example UMVA of:
 
 dummy_data : <b>0x00007ff7d3942</b><b class="green">0b0</b>
 
