@@ -28,7 +28,12 @@
     <div style="width: 60%;">
         <h3>Intro</h3>
         <p>
-Rabbit holes, am I right?<br> 
+Rabbit holes, am I right?<br>
+
+The purpose of my small project was to understand the inner workings of the kernel that are responsible for translating a UMVA into the PA. 
+After finishing up my OSR class recently, I wanted to know more about how VADs <i>actually worked under the hood</i>, and how the kernel leverages them to describe the PTEs associated with a section. 
+I wanted to understand how, and by what mechanisms, does the kernel "resolve" a virtual address (UMVA) into it's physical address (PA).
+Of course, you can't really go far when talking about memory management in the kernel without talking about PTEs, PML4, PDPTEs, etc, but there are other, better resources that go in-depth into addressing. 
 Much incredible work has been done already to describe this process, and without the following posts (in no particular order), I would not have been able to accomplish my task:<br>
 </p>
 <ol> <!-- lmao @ "in no particular order" but uses <ol> -->
@@ -45,17 +50,8 @@ Much incredible work has been done already to describe this process, and without
     <li class="linkie">https://github.com/Cr4sh/PTBypass-PoC</li>
     <li class="linkie">https://imphash.medium.com/windows-process-internals-a-few-concepts-to-know-before-jumping-on-memory-forensics-part-4-16c47b89e826</li>
 </ol>
-
 <p>
-s/o to ch3rn0byl and s4r1n
-</p>
-<h3>Objective</h3>
-<p>The purpose of my small project was to understand the inner workings of the kernel that are responsible for translating a UMVA into the PA. 
-After finishing up my OSR class recently, I wanted to know more about how VADs <i>actually worked under the hood</i>, and how the kernel leverages them to describe the PTEs associated with a section.
-I wanted to understand how, and by what mechanisms, does the kernel "resolve" a virtual address (UMVA) into it's Physical Address (PA).
-Of course, you can't really go far when talking about memory management in the kernel without talking about PTEs, PML4, PDPTEs, etc, but there are other, better resources that go in-depth into addressing. 
 Arming myself with the knowledge from the above links (read them, and if you wrote them, "hi!") I set out to take a deeper dive into the VAD.
-
 I am no expert or authority on Kernel programming or the Memory Manager by any means, and if there are errors in the following *please* make a pull request.
 </p>
 <h3>What is a VAD?</h3>
@@ -562,6 +558,9 @@ NTSTATUS ManualVirtualToPhys(PVOID lpSystemBuffer, PULONG pcbWritten){
 }
 </pre>
 <p>Thanks for coming to my VAD talk.</p>
+<p>
+s/o to ch3rn0byl and s4r1n
+</p>
     </div>
     </body>
     <footer>
