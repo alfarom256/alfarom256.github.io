@@ -103,7 +103,7 @@ Total VADs: 26, average level: 4, maximum depth: 5
 Total private commit: 0xa3 pages (652 KB)
 Total shared commit:  0x3a pages (232 KB)
 </pre>
-<p>What you see is a list of VADs, and the associated ranges they represent within the target process. Within each VAD, we should expect a list of PTEs that correspond to that segment.
+<p>What you see is a list of VAD Trees (VadRoot), and the associated ranges they represent within the target process. Within each VAD Node in each VadRoot, we should expect a list of PTEs that correspond to that segment.
 "Well, those Start and End colums look kinda like addresses... but why are they truncated?" you may ask. And good question!
 Without going too much into detail about address translation, we know the size of a page is <b>0x1000 (4096, 4kb)</b> bytes, and we also know the last 12 bits of an address index into the page for the actual memory.
 
@@ -123,7 +123,7 @@ Let's break down the UMVA 0x7ffdac4c34b0 (something random within ntdll).
 <b>0111 1111 1111 1101 1010 1100 0100 1100 0011</b><b class="green"> 0100 1011 0000</b>
 
 We know the offset into the PA is the last 12b (0x4b0).
-We know the VAD describing ntdll STARTS at the UMVA 0x7ffdac4c0000.
+We know the VAD/VadRoot describing ntdll STARTS at the UMVA 0x7ffdac4c0000.
 We can find yet another "offset" into this region of memory by subtracting our UMVA by the UMVA of ntdll's base:
 
 (our pointer) 0x7ffdac4c34b0 - (ntdll base) 0x7ffdac4c0000 = (offset) 0x34b0
