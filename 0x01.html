@@ -102,30 +102,30 @@ Without going too much into detail about address translation, we know the size o
 
 By multiplying the Start and End values by 0x1000, we will find the values actually represented in user-mode (UM).
 
-E.g. for the last VAD, we'll take <b>0x7ffdac4c0 * 0x1000 ==></b> <b class="green">0x7ffdac4c0000</b> which gives us our "real" UM base address of ntdll.
+E.g. for the last VAD, we'll take <b>0x7ff7d3942 * 0x1000 ==></b> <b class="green">0x00007ff7d39420b0</b> which gives us our "real" UM base address of our process.
 
-The problem, for my sake, was:
+My problem was:
 If a page is only 4KB, and a "section" can describe more than 4KB (obviously), how does the operating system know what PTEs to *actually use* for a VAD?
 VADs are explicitly designed to be "easier" to manage, after all.
 
 So how could I take some arbitrary user address and map it to it's physical address?
 
-Let's break down the UMVA 0x7ffdac4c34b0 (something random within ntdll).
+Let's break down an example VA within our target process' image: 0x00007ff7d39420b0.
 
-<b>0x7ffdac4c3</b><b class="green">4b0</b>
-<b>0111 1111 1111 1101 1010 1100 0100 1100 0011</b><b class="green"> 0100 1011 0000</b>
+<b>0x00007ff7d3942</b><b class="green">0b0</b>
+<b>0111 1111 1111 0111 1101 0011 1001 0100 0010</b><b class="green"> 0000 1011 0000</b>
 
-We know the offset into the PA is the last 12b (0x4b0).
-We know the VAD/VadRoot describing ntdll STARTS at the UMVA 0x7ffdac4c0000.
-We can find yet another "offset" into this region of memory by subtracting our UMVA by the UMVA of ntdll's base:
+We know the offset into the PA is the last 12b (0x0b0).
+We know the VAD/VadRoot describing our process STARTS at the UMVA 0x7ff7d3942000.
+We can find yet another "offset" into this region of memory by subtracting our UMVA by the UMVA of our process' base:
 
-(our pointer) 0x7ffdac4c34b0 - (ntdll base) 0x7ffdac4c0000 = (offset) 0x34b0
+(our pointer) 0x7ffdac4c34b0 - (our process base) 0x7ffdac4c0000 = (offset) 0x34b0
 
-Knowing a page is 0x1000 in size, we can divide 0x34b0 by 0x1000 to know how many pages "into ntdll" we will be:
+Knowing a page is 0x1000 in size, we can divide 0x34b0 by 0x1000 to know how many pages "into our process" we will be:
 
 0x34b0 / 0x1000 = 3, aka the third page
 
-Now we know that within the third page describing ntdll, we are 0x4b0 bytes offset (the remainder) into the page.
+Now we know that within the third page describing our process, we are 0x4b0 bytes offset (the remainder) into the page.
 
 Boom, viola. I guess? 
 Now we at least have a recipe to get what we're after...
