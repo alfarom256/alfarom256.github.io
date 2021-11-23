@@ -119,13 +119,13 @@ We know the offset into the PA is the last 12b (0x0b0).
 We know the VAD/VadRoot describing our process STARTS at the UMVA 0x7ff7d3942000.
 We can find yet another "offset" into this region of memory by subtracting our UMVA by the UMVA of our process' base:
 
-(our pointer) 0x7ffdac4c34b0 - (our process base) 0x7ffdac4c0000 = (offset) 0x34b0
+(our pointer) 0x7ff7d39420b0 - (our process base) 0x7ff7d3810000 = (offset) 0x1320B0
 
-Knowing a page is 0x1000 in size, we can divide 0x34b0 by 0x1000 to know how many pages "into our process" we will be:
+Knowing a page is 0x1000 in size, we can divide 0x1320B0 by 0x1000 to know how many pages "into our process" we will be:
 
-0x34b0 / 0x1000 = 3, aka the third page
+0x34b0 / 0x1000 = 0x132, aka the 306th page.
 
-Now we know that within the third page describing our process, we are 0x4b0 bytes offset (the remainder) into the page.
+Now we know that within the third page describing our process, we are 0x0b0 bytes offset (the remainder) into the page.
 
 Boom, viola. I guess? 
 Now we at least have a recipe to get what we're after...
@@ -133,57 +133,9 @@ Now we at least have a recipe to get what we're after...
 
 <h3>Okay, let's dig in</h3>
 
-<p>Suppose I have a driver, and corresponding UM program where the UM program will pass a UMVA to the driver, which will return it's physical page.
-
-<b>User Program</b>
-</p>
-<pre class="code">
-#include &lt;Windows.h&gt;
-#include &lt;stdio.h&gt;
-#include "..\PMLE4-Stuff\DriverCommon.h"
-
-int main() {
-    HANDLE hDevice = CreateFileA(
-        "\\\\.\\pml",
-        GENERIC_READ,
-        FILE_SHARE_WRITE | FILE_SHARE_READ,
-        NULL,
-        OPEN_EXISTING,
-        0,
-        NULL
-    );
-
-    if (!hDevice) {
-        printf("Could not open handle : %d\n", GetLastError());
-        return -1;
-    }
-
-    <b class="green">// take a pointer to some data</b>
-    const char* dummy_data = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    DWORD64 userVirtual = (DWORD64)dummy_data;
-    DWORD dwBytesReturned = 0;
-
-    <b class="green">// pass it off to the driver</b>
-    BOOL res = DeviceIoControl(hDevice, IOCTL_VIRT_TO_PHYS, &userVirtual, sizeof(DWORD64), &userVirtual, sizeof(DWORD64), &dwBytesReturned, NULL);
-    if (!res) {
-        printf("DeviceIoControl Failed : %d\n", GetLastError());
-    }
-
-    <b class="green">// print the returned physical address</b>
-    printf("%p has physical address of %p\n", dummy_data, userVirtual);
-    return 1;
-}
-</pre>
-
-<b>Driver:</b>
-<p><a href="https://github.com/alfarom256/UserVAtoPhysical/tree/main/PMLE4-Stuff">Link to the repo because I'm WAY too lazy to hand-jam more html</a></p>
-
 <p>
-
-Tl;dr: the UM program takes in a UM pointer and passes it off to the driver, which will return it's PA.
 So we know each process has a VAD, and we can find the "root" node (VadRoot) in the EPROCESS structure for the target process.
-
-SPEAKING OF target processes, let's look at the EPROCESS structure which we'll use to access the VadRoot:
+Let's examine the EPROCESS structure which we'll use to access the VadRoot:
 </p>
     
     <pre class="code">
@@ -200,9 +152,8 @@ SPEAKING OF target processes, let's look at the EPROCESS structure which we'll u
     </pre>
 
 <p>Anyone with a working set of peepers can notice that the VadRoot is at offset EPROCESS + 0x7d8.
-So let's do a little walkthrough of our simple user program and driver to see how this all works in action, and how we can walk the VAD to find our target PTE.
 
-In our UM program, we pass the address of <b>dummy_data</b> to our driver, which gives us the UMVA of:
+In our UM program, we pass the address of <b>dummy_data</b> to our driver, giving us our example UMVA of:
 
 dummy_data : <b>0x00007ff7d3942</b><b class="green">0b0</b>
 
@@ -467,6 +418,50 @@ So our driver must do the following:
 
 With aaaaaaaaaaaaaaall of that in mind, I present the function I wrote to do just this!
 </p>
+<p>The following Driver function and corresponding UM program show the process of putting this all together to walk the VAD, get the PTE, and find the PA.
+<b>User Program</b>
+</p>
+<pre class="code">
+#include &lt;Windows.h&gt;
+#include &lt;stdio.h&gt;
+#include "..\PMLE4-Stuff\DriverCommon.h"
+
+int main() {
+    HANDLE hDevice = CreateFileA(
+        "\\\\.\\pml",
+        GENERIC_READ,
+        FILE_SHARE_WRITE | FILE_SHARE_READ,
+        NULL,
+        OPEN_EXISTING,
+        0,
+        NULL
+    );
+
+    if (!hDevice) {
+        printf("Could not open handle : %d\n", GetLastError());
+        return -1;
+    }
+
+    <b class="green">// take a pointer to some data</b>
+    const char* dummy_data = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    DWORD64 userVirtual = (DWORD64)dummy_data;
+    DWORD dwBytesReturned = 0;
+
+    <b class="green">// pass it off to the driver</b>
+    BOOL res = DeviceIoControl(hDevice, IOCTL_VIRT_TO_PHYS, &userVirtual, sizeof(DWORD64), &userVirtual, sizeof(DWORD64), &dwBytesReturned, NULL);
+    if (!res) {
+        printf("DeviceIoControl Failed : %d\n", GetLastError());
+    }
+
+    <b class="green">// print the returned physical address</b>
+    printf("%p has physical address of %p\n", dummy_data, userVirtual);
+    return 1;
+}
+</pre>
+
+<b>Driver: (relevant snippet further down)</b>
+<p><a href="https://github.com/alfarom256/UserVAtoPhysical/tree/main/PMLE4-Stuff">Link to the repo because I'm WAY too lazy to hand-jam more html</a></p>
+<br>
 <b>PML4.cpp (yes, the project name isn't accurate, I'll rebase later)</b>
 <pre class="code">_Use_decl_annotations_
 NTSTATUS ManualVirtualToPhys(PVOID lpSystemBuffer, PULONG pcbWritten){
