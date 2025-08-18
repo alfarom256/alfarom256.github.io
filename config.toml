@@ -1,6 +1,6 @@
 baseURL = "https://malicious.dev/"
 languageCode = "en-us"
-title = "cd /wired"
+title = "~/wired/"
 theme = "retroconsole"
 
 [params]
