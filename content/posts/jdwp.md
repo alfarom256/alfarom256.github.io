@@ -1,7 +1,6 @@
 +++
 date = '2025-08-18T13:15:16-04:00'
 title = 'A Complete Noobs Exploration of JDWP and JDI'
-draft = true
 +++
 
 ## Intro
@@ -535,4 +534,6 @@ dr-xr-xr-x   9 polkitd              polkitd                            0 Aug 15 
 dr-xr-xr-x   9 root                 root                               0 Aug 15 20:13 1032
 ```
 
-The code can be viewed [here], 
+The code can be viewed [here](https://github.com/alfarom256/jditinker), and serves only as a potential alternative to existing tools and starting point for your tooling should you extend this project.
+
+YMMV
