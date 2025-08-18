@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.LanguageCode | default "en" }}">
+{{ partial "head.html" . }}
+<body>
+  {{ partial "spacefield.html" . }}
+  <div class="wrap">
+    {{ partial "header.html" . }}
+    <main role="main">
+      {{ block "main" . }}{{ end }}
+    </main>
+  </div>
+</body>
+</html>

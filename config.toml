@@ -1,0 +1,16 @@
+baseURL = "https://malicious.dev/"
+languageCode = "en-us"
+title = "cd /wired"
+theme = "retroconsole"
+
+[params]
+  prompt = "mike@malicious.dev:~$"
+  subtitle = "Random Technical Posts and Curios"
+  aboutTitle = "About me"
+  about = "Security engineer and low-level dev. Writing about Rust, Windows internals, bad drivers, and general nonsense."
+  github = "https://github.com/alfarom256"
+  linkedin = "https://www.linkedin.com/in/alfarom256"
+
+[caches]
+  [caches.images]
+    dir = ':cacheDir/images'

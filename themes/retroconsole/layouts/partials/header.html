@@ -1,0 +1,5 @@
+<header class="site">
+  <div class="prompt">{{ with .Site.Params.prompt }}{{ . }}{{ else }}user@retro:~${{ end }}</div>
+  <h1>{{ .Site.Title }} <span class="cursor" aria-hidden="true"></span></h1>
+  {{ with .Site.Params.subtitle }}<p class="post-meta">{{ . }}</p>{{ end }}
+</header>

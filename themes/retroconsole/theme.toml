@@ -1,0 +1,10 @@
+name = "retroconsole"
+license = "MIT"
+licenselink = "https://opensource.org/licenses/MIT"
+description = "Minimalist technical blog in retro console style with pixel-art galaxy background and occasional meteors."
+homepage = "https://example.com"
+min_version = "0.120.0"
+
+[author]
+  name = "Your Name"
+  homepage = "https://example.com"

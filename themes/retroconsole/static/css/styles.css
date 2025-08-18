@@ -1,0 +1,164 @@
+:root{
+  --fg: #b8f6b1;
+  --fg-dim: #7bd67e;
+  --accent: #caffca;
+  --muted: #5aa95b;
+  --maxw: 62rem;
+  --line: 1.7;
+  --post-bg: rgba(15, 12, 34, 0.7);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  line-height: var(--line);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+  background: black;
+}
+
+/* Pixel-art galaxy sits at the furthest back layer */
+#spacefield {
+  position: fixed;
+  inset: 0;
+  z-index: -9999;
+  display: block;
+  background: black;
+}
+
+/* Wrapping code blocks */
+pre, code {
+  background: rgba(120, 150, 200, 0.08);
+  /* border: 1px solid rgba(120, 150, 200, 0.18); */
+}
+code {
+  padding: .1rem .3rem;
+  border-radius: .1rem;
+}
+pre {
+  padding: .1rem;
+  border-radius: .5rem;
+  overflow: auto;
+  max-width: 100%;
+}
+
+pre code {
+  display: block;
+  white-space: pre-wrap;   /* allow wrapping */
+  word-wrap: break-word;   /* legacy support */
+  overflow-wrap: anywhere; /* wrap very long tokens */
+}
+
+
+.wrap {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 6rem 1.25rem 8rem;
+}
+
+header.site {
+  margin-bottom: 3rem;
+  border-left: 2px solid var(--fg-dim);
+  padding-left: 1rem;
+}
+
+.prompt { color: var(--muted); }
+.cursor { display: inline-block; width: .6ch; background: var(--accent); animation: blink 1.2s steps(1,end) infinite; }
+@keyframes blink { 50% { background: transparent; } }
+
+h1, h2, h3 { color: var(--accent); font-weight: 600; margin: 1.5rem 0 .5rem; }
+a { color: var(--accent); text-decoration: none; border-bottom: 1px dashed var(--fg-dim); }
+a:hover { filter: brightness(1.2); border-bottom-style: solid; }
+
+.post-meta { color: var(--muted); font-size: .9rem; }
+
+/* Post container background */
+article.post-card, .post-single {
+  background: var(--post-bg);
+  padding: 1.5rem;
+  border-radius: 0.5rem;
+  margin-bottom: 2rem;
+  box-shadow: 0 0 10px rgba(0,0,0,0.5);
+  border: 1px solid rgba(120, 150, 200, 0.25);
+}
+
+.post-title { margin: 0 0 .25rem; }
+.post-card header, .post-single header { margin-bottom: .5rem; }
+
+/* Respect reduced motion for cursor blink */
+@media (prefers-reduced-motion: reduce) {
+  .cursor { animation: none; background: currentColor; }
+}
+
+/* Card background for the ToC */
+.toc-card {
+  background: rgba(15, 20, 40, 0.75); /* dark semi-translucent, lets galaxy show */
+  padding: 1.5rem 2rem;
+  border-radius: .5rem;
+  margin-bottom: 2rem;
+  box-shadow: 0 0 15px rgba(0,0,0,.6);
+}
+
+/* Optional: subtle border matching theme */
+.toc-card {
+  border: 1px solid rgba(120, 150, 200, 0.25);
+}
+
+/* Two-line ToC layout */
+.toc-line {
+  margin: 1rem 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.toc-top {
+  display: flex;
+  align-items: baseline;
+}
+
+.toc-title {
+  white-space: nowrap;
+}
+.toc-title a {
+  color: var(--fg);
+  border-bottom: none;
+}
+
+.dots {
+  flex: 1 1 auto;
+  border-bottom: 1px dotted var(--fg-dim);
+  margin: 0 .5rem;
+  transform: translateY(-.3em);
+  opacity: 0.6;
+}
+
+.toc-idx {
+  white-space: nowrap;
+  color: var(--accent);
+}
+
+.toc-bottom {
+  font-size: 0.9rem;
+  color: var(--muted);
+  margin-left: 0.5rem;
+}
+
+
+/* About card */
+.about-card {
+  background: rgba(15, 20, 40, 0.75); /* dark semi-translucent, lets galaxy show */
+  padding: 1.5rem 2rem;
+  border-radius: .5rem;
+  margin-bottom: 2rem;
+  box-shadow: 0 0 15px rgba(0,0,0,.6);
+  border: 1px solid rgba(120, 150, 200, 0.25);
+}
+.about-title { margin: 0 0 .5rem; color: var(--accent); }
+.about-text { margin: 0 0 .75rem; }
+.about-links { list-style: none; margin: 0; padding: 0; display: flex; gap: 1rem; flex-wrap: wrap; }
+.about-links a { border-bottom: 1px dashed var(--fg-dim); }
+.about-links a:hover { border-bottom-style: solid; }

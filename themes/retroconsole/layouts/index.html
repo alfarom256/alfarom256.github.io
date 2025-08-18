@@ -1,0 +1,22 @@
+{{ define "main" }}
+  <nav class="toc-card">
+    <h2 class="toc-title">Posts</h2>
+    <ul class="toc mono">
+      {{ $pages := .Site.RegularPages.ByDate.Reverse }}
+      {{ range $i, $p := $pages }}
+        <li class="toc-line">
+          <div class="toc-top">
+            <span class="toc-title"><a href="{{ $p.RelPermalink }}">{{ $p.Title }}</a></span>
+            <span class="dots"></span>
+            <span class="toc-idx">{{ printf "0x%02X" $i }}</span>
+          </div>
+          <div class="toc-bottom">
+            {{ $p.Date.Format "2006-01-02" }} - {{ $p.ReadingTime }} min
+          </div>
+        </li>
+      {{ end }}
+    </ul>
+  </nav>
+
+  {{ partial "about.html" . }}
+{{ end }}

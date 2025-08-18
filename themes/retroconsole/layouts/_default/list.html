@@ -1,0 +1,28 @@
+{{ define "main" }}
+  {{ if .IsHome }}
+    <nav class="toc-card">
+      <h2 class="toc-title">Posts</h2>
+      <ul class="toc">
+        {{ range .Site.RegularPages.ByDate.Reverse }}
+          <li>
+            <a href="{{ .RelPermalink }}">{{ .Title }}</a>
+            <span class="toc-meta">{{ .Date.Format "2006-01-02" }} · {{ .ReadingTime }} min</span>
+          </li>
+        {{ end }}
+      </ul>
+    </nav>
+
+    {{ partial "about.html" . }}
+  {{ else }}
+    {{ range .Paginator.Pages }}
+      <article class="post-card">
+        <header>
+          <h2 class="post-title"><a href="{{ .RelPermalink }}">{{ .Title }}</a></h2>
+          <div class="post-meta">{{ .Date.Format "2006-01-02" }} · {{ .ReadingTime }} min read</div>
+        </header>
+        {{ with .Summary }}<p>{{ . }}</p>{{ end }}
+      </article>
+    {{ end }}
+    {{ template "_internal/pagination.html" . }}
+  {{ end }}
+{{ end }}
