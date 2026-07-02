@@ -1,4 +1,7 @@
 <header class="site">
+  {{ if not .IsHome }}
+  <nav class="topnav"><a class="homebtn" href="{{ "/" | relURL }}" title="Home">cd ~</a></nav>
+  {{ end }}
   <div class="prompt">{{ with .Site.Params.prompt }}{{ . }}{{ else }}user@retro:~${{ end }}</div>
   <h1>{{ .Site.Title }} <span class="cursor" aria-hidden="true"></span></h1>
   {{ with .Site.Params.subtitle }}<p class="post-meta">{{ . }}</p>{{ end }}

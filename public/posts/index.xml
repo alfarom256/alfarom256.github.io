@@ -1,33 +1,18 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?>
-<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
-  <channel>
-    <title>Posts on ~/wired/</title>
-    <link>http://localhost:1313/posts/</link>
-    <description>Recent content in Posts on ~/wired/</description>
-    <generator>Hugo</generator>
-    <language>en-us</language>
-    <lastBuildDate>Mon, 18 Aug 2025 13:15:16 -0400</lastBuildDate>
-    <atom:link href="http://localhost:1313/posts/index.xml" rel="self" type="application/rss+xml" />
-    <item>
-      <title>A Complete Noobs Exploration of JDWP and JDI</title>
-      <link>http://localhost:1313/posts/jdwp/</link>
-      <pubDate>Mon, 18 Aug 2025 13:15:16 -0400</pubDate>
-      <guid>http://localhost:1313/posts/jdwp/</guid>
-      <description>&lt;h2 id=&#34;intro&#34;&gt;Intro&lt;/h2&gt;&#xA;&lt;p&gt;Recently on a penetration test my team and I discovered several JDWP ports open. The Java Debug Wire Protocol (JDWP) is &lt;a href=&#34;https://docs.oracle.com/javase/8/docs/technotes/guides/jpda/jdwp-spec.html&#34;&gt;&amp;quot;[&amp;hellip;] used for communication between a debugger and the Java virtual machine (VM) which it debugs.&amp;quot;&lt;/a&gt;&lt;/p&gt;&#xA;&lt;p&gt;So tl;dr: You can connect to a remote or local JVM over various protocols, break/suspend threads, and run code in the context of the suspended thread(s).&lt;/p&gt;&#xA;&lt;p&gt;Public tooling for JDWP exploitation:&lt;/p&gt;&#xA;&lt;ul&gt;&#xA;&lt;li&gt;IOActive&amp;rsquo;s &lt;a href=&#34;https://github.com/IOActive/jdwp-shellifier&#34;&gt;jdwp-shellifier&lt;/a&gt;&lt;/li&gt;&#xA;&lt;li&gt;Metasploit&amp;rsquo;s &lt;a href=&#34;https://github.com/rapid7/metasploit-framework/blob/7f833ceba5d6ad01272fbf6169fb24dcf0173c68/modules/exploits/multi/misc/java_jdwp_debugger.rb&#34;&gt;java_jdwp_debugger.rb&lt;/a&gt;&lt;/li&gt;&#xA;&lt;/ul&gt;&#xA;&lt;h2 id=&#34;problem&#34;&gt;Problem&lt;/h2&gt;&#xA;&lt;p&gt;Our exploitation of JDWP was &lt;em&gt;&lt;strong&gt;severely limited&lt;/strong&gt;&lt;/em&gt; due to traffic restrictions preventing us from uploading and executing our C2 tooling, with our only options being a DNS C2 channel or executing commands directly via JDWP.&lt;/p&gt;</description>
-    </item>
-    <item>
-      <title>What&#39;s in a VAD? User VA to Physical Address!</title>
-      <link>http://localhost:1313/posts/vad/</link>
-      <pubDate>Sun, 01 Aug 2021 13:15:16 -0400</pubDate>
-      <guid>http://localhost:1313/posts/vad/</guid>
-      <description>&lt;h2 id=&#34;intro&#34;&gt;Intro&lt;/h2&gt;&#xA;&lt;p&gt;Rabbit holes, am I right?&lt;/p&gt;&#xA;&lt;p&gt;The purpose of my small project was to understand the inner workings of the kernel that are responsible for translating a UMVA into the PA.&#xA;After finishing up my OSR class recently, I wanted to know more about how VADs actually worked under the hood, and how the kernel leverages them to describe the PTEs associated with a section.&#xA;I wanted to understand how, and by what mechanisms, does the kernel &amp;ldquo;resolve&amp;rdquo; a virtual address (UMVA) into it&amp;rsquo;s physical address (PA).&#xA;Of course, you can&amp;rsquo;t really go far when talking about memory management in the kernel without talking about PTEs, PML4, PDPTEs, etc, but there are other, better resources that go in-depth into addressing.&#xA;Much incredible work has been done already to describe this process, and without the following posts (in no particular order), I would not have been able to accomplish my task:&lt;/p&gt;</description>
-    </item>
-    <item>
-      <title>A Foray For Fun into Windows Fibers</title>
-      <link>http://localhost:1313/posts/fibers/</link>
-      <pubDate>Fri, 01 Jan 2021 13:15:16 -0400</pubDate>
-      <guid>http://localhost:1313/posts/fibers/</guid>
-      <description>&lt;p&gt;The Windows fiber API has been described as one of the &amp;ldquo;most elegant&amp;rdquo; APIs available to the Windows programmer for manual execution scheduling.&#xA;I&amp;rsquo;m by no means an expert in how fibers work, nor how to deploy them into a large-scale application.&#xA;There is not a lot of documentation about how fibers work internally, so I thought it might be at least interesting or helpful to write about some of what I found.&lt;/p&gt;</description>
-    </item>
-  </channel>
-</rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Posts on ~/wired/</title><link>https://malicious.dev/posts/</link><description>Recent content in Posts on ~/wired/</description><generator>Hugo</generator><language>en-us</language><lastBuildDate>Mon, 18 Aug 2025 13:15:16 -0400</lastBuildDate><atom:link href="https://malicious.dev/posts/index.xml" rel="self" type="application/rss+xml"/><item><title>A Complete Noobs Exploration of JDWP and JDI</title><link>https://malicious.dev/posts/jdwp/</link><pubDate>Mon, 18 Aug 2025 13:15:16 -0400</pubDate><guid>https://malicious.dev/posts/jdwp/</guid><description>&lt;h2 id="intro">Intro&lt;/h2>
+&lt;p>Recently on a penetration test my team and I discovered several JDWP ports open. The Java Debug Wire Protocol (JDWP) is &lt;a href="https://docs.oracle.com/javase/8/docs/technotes/guides/jpda/jdwp-spec.html">&amp;quot;[&amp;hellip;] used for communication between a debugger and the Java virtual machine (VM) which it debugs.&amp;quot;&lt;/a>&lt;/p>
+&lt;p>So tl;dr: You can connect to a remote or local JVM over various protocols, break/suspend threads, and run code in the context of the suspended thread(s).&lt;/p>
+&lt;p>Public tooling for JDWP exploitation:&lt;/p>
+&lt;ul>
+&lt;li>IOActive&amp;rsquo;s &lt;a href="https://github.com/IOActive/jdwp-shellifier">jdwp-shellifier&lt;/a>&lt;/li>
+&lt;li>Metasploit&amp;rsquo;s &lt;a href="https://github.com/rapid7/metasploit-framework/blob/7f833ceba5d6ad01272fbf6169fb24dcf0173c68/modules/exploits/multi/misc/java_jdwp_debugger.rb">java_jdwp_debugger.rb&lt;/a>&lt;/li>
+&lt;/ul>
+&lt;h2 id="problem">Problem&lt;/h2>
+&lt;p>Our exploitation of JDWP was &lt;em>&lt;strong>severely limited&lt;/strong>&lt;/em> due to traffic restrictions preventing us from uploading and executing our C2 tooling, with our only options being a DNS C2 channel or executing commands directly via JDWP.&lt;/p></description></item><item><title>What's in a VAD? User VA to Physical Address!</title><link>https://malicious.dev/posts/vad/</link><pubDate>Sun, 01 Aug 2021 13:15:16 -0400</pubDate><guid>https://malicious.dev/posts/vad/</guid><description>&lt;h2 id="intro">Intro&lt;/h2>
+&lt;p>Rabbit holes, am I right?&lt;/p>
+&lt;p>The purpose of my small project was to understand the inner workings of the kernel that are responsible for translating a UMVA into the PA.
+After finishing up my OSR class recently, I wanted to know more about how VADs actually worked under the hood, and how the kernel leverages them to describe the PTEs associated with a section.
+I wanted to understand how, and by what mechanisms, does the kernel &amp;ldquo;resolve&amp;rdquo; a virtual address (UMVA) into it&amp;rsquo;s physical address (PA).
+Of course, you can&amp;rsquo;t really go far when talking about memory management in the kernel without talking about PTEs, PML4, PDPTEs, etc, but there are other, better resources that go in-depth into addressing.
+Much incredible work has been done already to describe this process, and without the following posts (in no particular order), I would not have been able to accomplish my task:&lt;/p></description></item><item><title>A Foray For Fun into Windows Fibers</title><link>https://malicious.dev/posts/fibers/</link><pubDate>Fri, 01 Jan 2021 13:15:16 -0400</pubDate><guid>https://malicious.dev/posts/fibers/</guid><description>&lt;p>The Windows fiber API has been described as one of the &amp;ldquo;most elegant&amp;rdquo; APIs available to the Windows programmer for manual execution scheduling.
+I&amp;rsquo;m by no means an expert in how fibers work, nor how to deploy them into a large-scale application.
+There is not a lot of documentation about how fibers work internally, so I thought it might be at least interesting or helpful to write about some of what I found.&lt;/p></description></item></channel></rss>

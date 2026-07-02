@@ -1,28 +1,29 @@
 {{ define "main" }}
-  {{ if .IsHome }}
-    <nav class="toc-card">
-      <h2 class="toc-title">Posts</h2>
-      <ul class="toc">
-        {{ range .Site.RegularPages.ByDate.Reverse }}
-          <li>
-            <a href="{{ .RelPermalink }}">{{ .Title }}</a>
-            <span class="toc-meta">{{ .Date.Format "2006-01-02" }} · {{ .ReadingTime }} min</span>
+  <section class="term">
+    <div class="term-bar">
+      <span class="term-dots"><i class="dot-r"></i><i class="dot-y"></i><i class="dot-g"></i></span>
+      <span class="term-title"><b>mike@malicious.dev</b>: ~/{{ .Section | default "posts" }}</span>
+    </div>
+    <div class="term-body">
+      <p class="cmd"><span class="usr">mike@malicious.dev</span>:<span class="pth">~/{{ .Section | default "posts" }}</span>$ ls -la</p>
+      {{ $pages := .Paginator.Pages }}
+      {{ if .IsHome }}{{ $pages = .Site.RegularPages.ByDate.Reverse }}{{ end }}
+      <ul class="toc mono">
+        {{ range $pages }}
+          <li class="toc-line">
+            <div class="toc-top">
+              <span class="toc-title"><a href="{{ .RelPermalink }}">{{ .Title }}</a></span>
+              <span class="dots"></span>
+            </div>
+            <div class="toc-bottom">
+              {{ .Date.Format "2006-01-02" }} - {{ .ReadingTime }} min
+            </div>
           </li>
         {{ end }}
       </ul>
-    </nav>
+      {{ if not .IsHome }}{{ template "_internal/pagination.html" . }}{{ end }}
+    </div>
+  </section>
 
-    {{ partial "about.html" . }}
-  {{ else }}
-    {{ range .Paginator.Pages }}
-      <article class="post-card">
-        <header>
-          <h2 class="post-title"><a href="{{ .RelPermalink }}">{{ .Title }}</a></h2>
-          <div class="post-meta">{{ .Date.Format "2006-01-02" }} · {{ .ReadingTime }} min read</div>
-        </header>
-        {{ with .Summary }}<p>{{ . }}</p>{{ end }}
-      </article>
-    {{ end }}
-    {{ template "_internal/pagination.html" . }}
-  {{ end }}
+  {{ if .IsHome }}{{ partial "about.html" . }}{{ end }}
 {{ end }}

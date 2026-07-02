@@ -1,22 +1,45 @@
 {{ define "main" }}
-  <nav class="toc-card">
-    <h2 class="toc-title">Posts</h2>
-    <ul class="toc mono">
-      {{ $pages := .Site.RegularPages.ByDate.Reverse }}
-      {{ range $i, $p := $pages }}
-        <li class="toc-line">
-          <div class="toc-top">
-            <span class="toc-title"><a href="{{ $p.RelPermalink }}">{{ $p.Title }}</a></span>
-            <span class="dots"></span>
-            <span class="toc-idx">{{ printf "0x%02X" $i }}</span>
-          </div>
-          <div class="toc-bottom">
-            {{ $p.Date.Format "2006-01-02" }} - {{ $p.ReadingTime }} min
-          </div>
-        </li>
-      {{ end }}
-    </ul>
-  </nav>
+  <section class="term" id="home-term">
+    <div class="term-bar">
+      <span class="term-title"><b>mike@malicious.dev</b>: ~</span>
+    </div>
+    <div class="term-body">
+      <div id="boot" class="boot" aria-hidden="true"></div>
 
-  {{ partial "about.html" . }}
+      <div id="console">
+        <p class="cmd"><span class="usr">mike@malicious.dev</span>:<span class="pth">~</span>$ <span class="typed">ls -la ./posts</span></p>
+        <div class="out">
+          <ul class="toc mono">
+            {{ $pages := .Site.RegularPages.ByDate.Reverse }}
+            {{ $last := sub (len $pages) 1 }}
+            {{ range $i, $p := $pages }}
+              <li class="toc-line">
+                <div class="toc-top">
+                  <span class="toc-title"><a href="{{ $p.RelPermalink }}">{{ $p.Title }}</a></span>
+                  <span class="dots"></span>
+                  <span class="toc-idx">{{ printf "0x%02X" (sub $last $i) }}</span>
+                </div>
+                <div class="toc-bottom">{{ $p.Date.Format "2006-01-02" }} - {{ $p.ReadingTime }} min</div>
+              </li>
+            {{ end }}
+          </ul>
+        </div>
+
+        <p class="cmd"><span class="usr">mike@malicious.dev</span>:<span class="pth">~</span>$ <span class="typed">cat about.txt</span></p>
+        <div class="out">
+          <h2 class="about-title">{{ .Site.Params.aboutTitle | default "About" }}</h2>
+          {{ with .Site.Params.about }}<p class="about-text">{{ . }}</p>{{ end }}
+          <ul class="about-links">
+            {{ with .Site.Params.github }}<li><a href="{{ . }}" rel="me" target="_blank">GitHub</a></li>{{ end }}
+            {{ with .Site.Params.linkedin }}<li><a href="{{ . }}" rel="me" target="_blank">LinkedIn</a></li>{{ end }}
+            {{ with .Site.Params.email }}<li><a href="mailto:{{ . }}">Email</a></li>{{ end }}
+          </ul>
+        </div>
+
+        <p class="cmd end"><span class="usr">mike@malicious.dev</span>:<span class="pth">~</span>$ <span class="cursor" aria-hidden="true"></span></p>
+      </div>
+    </div>
+  </section>
+
+  <script src="{{ "js/boot.js" | relURL }}" defer></script>
 {{ end }}

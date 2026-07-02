@@ -1,11 +1,23 @@
 {{ define "main" }}
-  <article class="post-single">
-    <header>
-      <h2 class="post-title">{{ .Title }}</h2>
-      <div class="post-meta">{{ .Date.Format "2006-01-02" }} · {{ .ReadingTime }} min read</div>
-    </header>
-    <div class="content">
-      {{ .Content }}
+  {{ $name := .Slug }}{{ with .File }}{{ $name = .BaseFileName }}{{ end }}
+  <article class="term" id="post-term">
+    <div class="term-bar">
+      <span class="term-title"><b>mike@malicious.dev</b>: ~/posts/{{ $name }}</span>
+    </div>
+    <div class="term-body">
+      <div id="post-boot" class="boot" aria-hidden="true"></div>
+      <div id="post-content">
+        <header>
+          <h2 class="post-title">{{ .Title }}</h2>
+          <div class="post-meta">{{ .Date.Format "2006-01-02" }} · {{ .ReadingTime }} min read</div>
+        </header>
+        <div class="content">
+          {{ .Content }}
+        </div>
+        <p class="cmd end"><span class="usr">mike@malicious.dev</span>:<span class="pth">~/posts</span>$ <span class="cursor" aria-hidden="true"></span></p>
+      </div>
     </div>
   </article>
+
+  <script src="{{ "js/post.js" | relURL }}" defer></script>
 {{ end }}
