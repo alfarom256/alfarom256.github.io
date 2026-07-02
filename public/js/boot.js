@@ -29,15 +29,41 @@
     return;
   }
 
-  var ART = String.raw`
-        .     *          _.-'''''-._            .    *
-   *          .        .'   .    o    '.     *
-        .            /    *     ()      \        .    *
-   .        *       :   .    .      .    :   S P A C E   O S
-        .           :    ()      *    .  :   ================
-   *          .      \     .    .      /     phosphor kernel 1.0
-        .    *        '.    *     .   .'      (c) WiredSystems
-   .          *        '-._______.-'    *  .`;
+  // blocky BIOS splash: a procedurally-generated spiral galaxy (░▒▓█) + banner.
+  // Deterministic (no randomness), so it renders identically every boot.
+  var ART = (function () {
+    var rows = 15, aspect = 2.0, incl = 1.25, cy = (rows - 1) / 2,
+        Rv = (rows - 1) / 2, Rh = Rv * aspect * 1.1,
+        cols = Math.ceil(Rh * 2) + 3, cx = cols / 2,
+        arms = 2, tight = 3.3, coreR = 1.8, maxR = Rh, sigma = 0.4, out = [];
+    for (var y = 0; y < rows; y++) {
+      var line = "";
+      for (var x = 0; x < cols; x++) {
+        var dx = x - cx + 0.5, dy = (y - cy) * aspect * incl,
+            r = Math.sqrt(dx * dx + dy * dy), theta = Math.atan2(dy, dx);
+        var disc = Math.exp(-r / (maxR * 0.5)) * 0.26;
+        var core = Math.exp(-(r * r) / (2 * coreR * coreR)) * 1.4;
+        var armAngle = tight * Math.log(r + 0.5), best = 0;
+        for (var a = 0; a < arms; a++) {
+          var ph = theta - armAngle - a * Math.PI;
+          ph = Math.atan2(Math.sin(ph), Math.cos(ph));
+          var near = Math.exp(-(ph * ph) / (2 * sigma * sigma));
+          if (near > best) best = near;
+        }
+        var arm = best * Math.pow(Math.max(0, 1 - r / maxR), 0.85);
+        var b = (r > maxR) ? 0 : core + arm + disc;
+        line += b > 0.7 ? "█" : b > 0.4 ? "▓" : b > 0.19 ? "▒" : b > 0.08 ? "░" : " ";
+      }
+      out.push(line.replace(/\s+$/, ""));
+    }
+    while (out.length && out[0] === "") out.shift();
+    while (out.length && out[out.length - 1] === "") out.pop();
+    return out.concat([
+      "",
+      "        S P A C E   O S      v1.0",
+      "        phosphor kernel · WiredSystems"
+    ]);
+  })();
 
   var LOG = [
     "",
@@ -64,13 +90,12 @@
     boot.style.display = "block";
 
     // draw the SpaceOS splash line-by-line, like real terminal output
-    var artLines = ART.replace(/^\n/, "").split("\n");
-    for (var i = 0; i < artLines.length; i++) {
+    for (var i = 0; i < ART.length; i++) {
       var a = document.createElement("div");
       a.className = "boot-art";
-      a.textContent = artLines[i];
+      a.textContent = ART[i];
       boot.appendChild(a);
-      await sleep(85 + Math.random() * 45);
+      await sleep(55 + Math.random() * 35);
     }
     await sleep(520);
 

@@ -214,7 +214,7 @@ header.site h1 {
 /* ── SpaceOS boot splash + staged reveal (home terminal) ───────────────── */
 .boot { letter-spacing: normal; word-spacing: normal; overflow-x: auto; }
 /* plain terminal text — no code-block box/shading */
-.boot-art { color: var(--fg); line-height: 1.12; white-space: pre; }
+.boot-art { color: var(--fg); line-height: 1.05; white-space: pre; }
 .boot-line { color: var(--fg-dim); line-height: 1.5; white-space: pre-wrap; }
 
 .js #home-term #console { display: none; }
